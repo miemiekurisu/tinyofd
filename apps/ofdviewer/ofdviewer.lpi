@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectOptions>
+    <Version Value="12"/>
+    <PathDelim Value="/"/>
+    <BuildModes>
+      <Item Name="default" Default="True"/>
+    </BuildModes>
+    <PublishOptions>
+      <Version Value="2"/>
+    </PublishOptions>
+    <RunParams>
+      <FormatVersion Value="2"/>
+    </RunParams>
+    <RequiredPackages>
+      <Item>
+        <PackageName Value="LCL"/>
+      </Item>
+    </RequiredPackages>
+    <Units>
+      <Unit>
+        <Filename Value="ofdviewer.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <UsageCount Value="21"/>
+      </Unit>
+      <Unit>
+        <Filename Value="main.pas"/>
+        <UsageCount Value="10"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="-1"/>
+  </ProjectOptions>
+  <CompilerOptions>
+    <Version Value="11"/>
+    <SearchPaths>
+      <OtherUnitFiles Value="../../packages/ofdcore/src;../../packages/ofdrender/src;../../packages/ofdlcl/src"/>
+      <UnitOutputDirectory Value="../../_tmp/build"/>
+    </SearchPaths>
+    <Parsing>
+      <SyntaxOptions>
+        <UseAnsiStrings Value="False"/>
+      </SyntaxOptions>
+    </Parsing>
+    { Debug info is controlled by script/build.ps1 (-g -gl for Debug, none for
+      Release) so the Release exe carries no DWARF/debug symbols. }
+    <CodeGeneration>
+      <Checks>
+        <RangeChecks Value="False"/>
+        <OverflowChecks Value="False"/>
+        <IoChecks Value="False"/>
+      </Checks>
+    </CodeGeneration>
+  </CompilerOptions>
+</CONFIG>

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="ofdrender" />
+    <Type Value="RunTime" />
+    <BuildMethod Value="Both" />
+    <Description Value="OFD rendering library" />
+    <CompilerOptions>
+      <Version Value="11" />
+      <SearchPaths>
+        <UnitOutputDirectory Value="../../_tmp/build/ofdrender" />
+        <OtherUnitFiles Value="src;../../_tmp/build/ofdcore" />
+      </SearchPaths>
+    </CompilerOptions>
+<Files>
+    <Item>
+      <Filename Value="src/ofd_canvas_intf.pas" />
+      <UnitName Value="ofd_canvas_intf" />
+    </Item>
+        <Item>
+      <Filename Value="src/ofd_render_types.pas" />
+      <UnitName Value="ofd_render_types" />
+    </Item>
+                    <Item>
+      <Filename Value="src/ofd_ttf_glyf.pas" />
+      <UnitName Value="ofd_ttf_glyf" />
+    </Item>
+        { P0 FIX: Include the new-pipeline units actually used by TOFDPageView.
+      Previously the package only listed legacy units, so the package did not
+      represent the real production render chain. }
+    <Item>
+      <Filename Value="src/ofd_display_list.pas" />
+      <UnitName Value="ofd_display_list" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_surface.pas" />
+      <UnitName Value="ofd_surface" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_compositor.pas" />
+      <UnitName Value="ofd_compositor" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_page_compiler.pas" />
+      <UnitName Value="ofd_page_compiler" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_render_service.pas" />
+      <UnitName Value="ofd_render_service" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_render_outcome.pas" />
+      <UnitName Value="ofd_render_outcome" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_render_diagnostics.pas" />
+      <UnitName Value="ofd_render_diagnostics" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_font_engine_intf.pas" />
+      <UnitName Value="ofd_font_engine_intf" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_ft2_api.pas" />
+      <UnitName Value="ofd_ft2_api" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_ft2_engine.pas" />
+      <UnitName Value="ofd_ft2_engine" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_glyphrun.pas" />
+      <UnitName Value="ofd_glyphrun" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_text_run_compiler.pas" />
+      <UnitName Value="ofd_text_run_compiler" />
+    </Item>
+  </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="ofdcore" />
+      </Item>
+      <Item>
+        <PackageName Value="LCL" />
+      </Item>
+    </RequiredPkgs>
+  </Package>
+</CONFIG>

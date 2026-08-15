@@ -1,0 +1,55 @@
+_tmp/
+testfile/
+sumatrapdf/
+ofdrw/
+AGENTS.md
+*.o
+*.obj
+*.ppu
+*.compiled
+*.bak
+*.or
+*.rst
+*.res
+*.dbg
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.log
+*.app/
+*.app.zip
+*.lps
+*.lpi.bak
+*.lfm.bak
+*.ppw
+.DS_Store
+.codegraph/
+packagefiles.xml
+*.new
+
+
+# macOS compiled binaries (no extension)
+apps/*/ofdviewer
+packages/**/ofd*.ppu
+packages/**/ofd*.o
+packages/**/ofd*.compiled
+
+# Lazarus IDE temp files
+link*.res
+linkfiles*.res
+ppaslink.sh
+
+# Icon intermediate files
+apps/ofdviewer/src/icons/*.ico
+
+# opencode session files
+.opencode/
+
+# agent run-continuation session files
+.omo/
+
+# Backup files
+*.bak2
+*.bak

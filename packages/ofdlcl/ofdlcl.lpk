@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="ofdlcl" />
+    <Type Value="RunTime" />
+    <BuildMethod Value="Both" />
+    <Description Value="OFD LCL runtime components" />
+    <CompilerOptions>
+      <Version Value="11" />
+      <SearchPaths>
+        <UnitOutputDirectory Value="../../_tmp/build/ofdlcl" />
+        <OtherUnitFiles Value="src;../../_tmp/build/ofdcore;../../_tmp/build/ofdrender" />
+        <IncludePaths Value="../../packages/ofdcore/src;../../packages/ofdrender/src" />
+      </SearchPaths>
+    </CompilerOptions>
+<Files>
+    <Item>
+      <Filename Value="src/ofd_page_view.pas" />
+      <UnitName Value="ofd_page_view" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_find_bar.pas" />
+      <UnitName Value="ofd_find_bar" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_thumbnail_view.pas" />
+      <UnitName Value="ofd_thumbnail_view" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofdlcl_register.pas" />
+      <UnitName Value="ofdlcl_register" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_document_view.pas" />
+      <UnitName Value="ofd_document_view" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_render_worker.pas" />
+      <UnitName Value="ofd_render_worker" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_surface_presenter.pas" />
+      <UnitName Value="ofd_surface_presenter" />
+    </Item>
+  </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="LCL" />
+      </Item>
+      <Item>
+        <PackageName Value="ofdrender" />
+      </Item>
+    </RequiredPkgs>
+  </Package>
+</CONFIG>

@@ -1,0 +1,75 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="ofdcore" />
+    <Type Value="RunTime" />
+    <BuildMethod Value="Both" />
+    <Description Value="OFD core parsing library" />
+    <CompilerOptions>
+      <Version Value="11" />
+      <SearchPaths>
+        <UnitOutputDirectory Value="../../_tmp/build/ofdcore" />
+        <OtherUnitFiles Value="src" />
+      </SearchPaths>
+    </CompilerOptions>
+<Files>
+    <Item>
+      <Filename Value="src/ofdcore.pas" />
+      <UnitName Value="ofdcore" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_errors.pas" />
+      <UnitName Value="ofd_errors" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_types.pas" />
+      <UnitName Value="ofd_types" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_package.pas" />
+      <UnitName Value="ofd_package" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_xml.pas" />
+      <UnitName Value="ofd_xml" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_document.pas" />
+      <UnitName Value="ofd_document" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_page.pas" />
+      <UnitName Value="ofd_page" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_resources.pas" />
+      <UnitName Value="ofd_resources" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_outline_types.pas" />
+      <UnitName Value="ofd_outline_types" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_outline.pas" />
+      <UnitName Value="ofd_outline" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_cache.pas" />
+      <UnitName Value="ofd_cache" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_font_metrics.pas" />
+      <UnitName Value="ofd_font_metrics" />
+    </Item>
+    <Item>
+      <Filename Value="src/ofd_text_search.pas" />
+      <UnitName Value="ofd_text_search" />
+    </Item>
+  </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="FCL" />
+      </Item>
+    </RequiredPkgs>
+  </Package>
+</CONFIG>
