@@ -219,7 +219,7 @@ type
     procedure FormDestroy(Sender: TObject);
     procedure FormShow(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
-    procedure FormCloseQuery(Sender: TObject; var Cancel: Boolean);
+    procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure FormDragOver(Sender: TObject; Source: TObject; X, Y: LongInt; State: TDragState; var Accept: Boolean);
     procedure FormDropFiles(Sender: TObject; const FileNames: array of string);
     procedure MenuFileOpenClick(Sender: TObject);
@@ -994,11 +994,24 @@ begin
   end;
 end;
 
-procedure TViewerMainForm.FormCloseQuery(Sender: TObject; var Cancel: Boolean);
+procedure TViewerMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
 begin
-  SaveSettings;
-  Cancel := False;
+  CanClose := True;
+
+  try
+    SaveSettings;
+  except
+    on E: Exception do
+      DebugLog('SaveSettings on close failed: ' + E.Message);
+  end;
+
   Application.Terminate;
+  {$IFDEF DARWIN}
+  { Lazarus Cocoa bug #39496 (gitlab.com/freepascal.org/lazarus/lazarus/-/issues/39496):
+    Application.Terminate sets Terminated but the Cocoa run loop does not check it
+    until a new event arrives, so the app would otherwise hang on quit. Force-exit. }
+  Halt(0);
+  {$ENDIF}
 end;
 
 procedure TViewerMainForm.FormDragOver(Sender: TObject; Source: TObject; X, Y: LongInt; State: TDragState; var Accept: Boolean);
@@ -2083,7 +2096,7 @@ end;
 
 procedure TViewerMainForm.DoExit;
 begin
-  Application.Terminate;
+  Close;
 end;
 
 procedure TViewerMainForm.DoFind;

@@ -62,8 +62,9 @@ type
     FQueue: array of TOFDRenderRequest;
     FShutdown: Boolean;
     FEvent: TEvent;
-    FOnPageRendered: TNotifyEvent; { raised on the main thread via Synchronize }
+    FOnPageRendered: TNotifyEvent; { raised on the main thread }
     procedure DoPageRendered;
+    procedure DoPageRenderedAsync(Data: PtrInt);
     procedure EvictIfNeeded;
   protected
     procedure Execute; override;
@@ -291,6 +292,11 @@ begin
     FOnPageRendered(Self);
 end;
 
+procedure TOFDPageRenderWorker.DoPageRenderedAsync(Data: PtrInt);
+begin
+  DoPageRendered;
+end;
+
 { Must be called with FLock held. Keeps the worker's page cache bounded so a
   long session scrolling/zooming a large document cannot grow memory without
   limit. Evicts the least-recently-accessed entries. }
@@ -383,6 +389,7 @@ var
   Bmp: TBitmap;
   C: TOFDCachedPage;
   I: Integer;
+  NotifyEvent: TDataEvent;
 begin
   try
     { Open our own document so fonts/resources are isolated from the UI thread. }
@@ -467,7 +474,8 @@ begin
       finally
         FLock.Leave;
       end;
-      Synchronize(DoPageRendered);
+      NotifyEvent := DoPageRenderedAsync;
+      Forms.Application.QueueAsyncCall(NotifyEvent, 0);
     end;
   end;
 
