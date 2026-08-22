@@ -62,9 +62,8 @@ type
     FQueue: array of TOFDRenderRequest;
     FShutdown: Boolean;
     FEvent: TEvent;
-    FOnPageRendered: TNotifyEvent; { raised on the main thread }
-    procedure DoPageRendered;
-    procedure DoPageRenderedAsync(Data: PtrInt);
+    FHasPendingRender: Boolean;   { guarded by FLock: set after a render completes }
+    FOnPageRendered: TNotifyEvent;
     procedure EvictIfNeeded;
   protected
     procedure Execute; override;
@@ -88,6 +87,10 @@ type
     function GetAnyCached(APageIndex: Integer): TBitmap;
     { True if a bitmap for the page is already cached at any width. }
     function HasAnyCached(APageIndex: Integer): Boolean;
+    { Atomically read-and-clear the "render completed" flag. Called periodically
+      on the main thread (timer) so the view repaints without any cross-thread
+      notification (avoids Synchronize/QueueAsyncCall races on Cocoa). }
+    function ConsumePendingRender: Boolean;
     procedure Shutdown;
     property OnPageRendered: TNotifyEvent read FOnPageRendered write FOnPageRendered;
     property Document: TOFDDocument read FDoc;
@@ -286,15 +289,19 @@ begin
   end;
 end;
 
-procedure TOFDPageRenderWorker.DoPageRendered;
+function TOFDPageRenderWorker.ConsumePendingRender: Boolean;
 begin
-  if Assigned(FOnPageRendered) then
-    FOnPageRendered(Self);
-end;
-
-procedure TOFDPageRenderWorker.DoPageRenderedAsync(Data: PtrInt);
-begin
-  DoPageRendered;
+  Result := False;
+  FLock.Enter;
+  try
+    if FHasPendingRender then
+    begin
+      FHasPendingRender := False;
+      Result := True;
+    end;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 { Must be called with FLock held. Keeps the worker's page cache bounded so a
@@ -389,7 +396,6 @@ var
   Bmp: TBitmap;
   C: TOFDCachedPage;
   I: Integer;
-  NotifyEvent: TDataEvent;
 begin
   try
     { Open our own document so fonts/resources are isolated from the UI thread. }
@@ -471,11 +477,10 @@ begin
       try
         FCache.Add(C);
         EvictIfNeeded;
+        FHasPendingRender := True;
       finally
         FLock.Leave;
       end;
-      NotifyEvent := DoPageRenderedAsync;
-      Forms.Application.QueueAsyncCall(NotifyEvent, 0);
     end;
   end;
 

@@ -49,6 +49,8 @@ type
     FWheelAccum: Integer;
     FRotationAngle: Integer;
     FRotCache: TObjectList;          { of TOFDRotatedPage; owns entries }
+    FTimer: TTimer;
+    procedure OnRenderPollTimer(Sender: TObject);
     procedure SetRotationAngle(const AValue: Integer);
     procedure ClearRotCache;
     procedure EvictRotCacheIfNeeded;
@@ -78,6 +80,9 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    { Stop and free the background render worker (used before forced app exit so
+      the worker thread does not touch freed memory during Halt). }
+    procedure StopBackgroundWorker;
     procedure LoadDocument(const ADoc: TOFDDocument);
     procedure GoToPage(AIndex: Integer);
     procedure GoToNextPage;
@@ -232,11 +237,29 @@ begin
   FPageView.Visible := False;
   FPageView.Color := clWhite;
 
+  { Poll the render worker's "render completed" flag on a short timer so the
+    view repaints when a background page render finishes, WITHOUT any cross-thread
+    notification (Synchronize/QueueAsyncCall deadlock or crash on Cocoa). }
+  FTimer := TTimer.Create(Self);
+  FTimer.Interval := 30;
+  FTimer.Enabled := False;
+  FTimer.OnTimer := OnRenderPollTimer;
+
   Self.OnMouseWheel := DoMouseWheel;
 end;
 
 destructor TOFDDocumentView.Destroy;
 begin
+  StopBackgroundWorker;
+  FPageView.Free;
+  FRotCache.Free;
+  inherited Destroy;
+end;
+
+procedure TOFDDocumentView.StopBackgroundWorker;
+begin
+  if FTimer <> nil then
+    FTimer.Enabled := False;
   if Assigned(FWorker) then
   begin
     FWorker.Terminate;
@@ -245,9 +268,6 @@ begin
     FWorker.Free;
     FWorker := nil;
   end;
-  FPageView.Free;
-  FRotCache.Free;
-  inherited Destroy;
 end;
 
 procedure TOFDDocumentView.LoadDocument(const ADoc: TOFDDocument);
@@ -284,6 +304,7 @@ begin
       FWorker := TOFDPageRenderWorker.Create(ADoc.Package.FileName);
       FWorker.OnPageRendered := WorkerPageRendered;
       FWorker.Start;
+      FTimer.Enabled := True;
     end;
   except
     on E: Exception do
@@ -1261,9 +1282,19 @@ end;
 
 procedure TOFDDocumentView.WorkerPageRendered(Sender: TObject);
 begin
-  { Called on the main thread via Synchronize when a background render finishes. }
   RequestVisiblePages;
   Invalidate;
+end;
+
+procedure TOFDDocumentView.OnRenderPollTimer(Sender: TObject);
+begin
+  { Called on the main thread by the poll timer. If the worker finished a render,
+    request the next visible pages and repaint. }
+  if Assigned(FWorker) and FWorker.ConsumePendingRender then
+  begin
+    RequestVisiblePages;
+    Invalidate;
+  end;
 end;
 
 procedure TOFDDocumentView.EnsureCurrentPageCached;

@@ -995,6 +995,9 @@ begin
 end;
 
 procedure TViewerMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+var
+  I: Integer;
+  Tab: TOFDViewerTab;
 begin
   CanClose := True;
 
@@ -1007,6 +1010,13 @@ begin
 
   Application.Terminate;
   {$IFDEF DARWIN}
+  { Stop background render workers so they do not post notifications during exit. }
+  for I := 0 to FTabList.Count - 1 do
+  begin
+    Tab := TOFDViewerTab(FTabList[I]);
+    if Assigned(Tab) and Assigned(Tab.DocView) then
+      Tab.DocView.StopBackgroundWorker;
+  end;
   { Lazarus Cocoa bug #39496 (gitlab.com/freepascal.org/lazarus/lazarus/-/issues/39496):
     Application.Terminate sets Terminated but the Cocoa run loop does not check it
     until a new event arrives, so the app would otherwise hang on quit. Force-exit. }
