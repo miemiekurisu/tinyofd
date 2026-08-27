@@ -33,7 +33,7 @@
   <CompilerOptions>
     <Version Value="11"/>
     <SearchPaths>
-      <OtherUnitFiles Value="../../packages/ofdcore/src;../../packages/ofdrender/src;../../packages/ofdlcl/src"/>
+      <OtherUnitFiles Value="src;../../packages/ofdcore/src;../../packages/ofdrender/src;../../packages/ofdlcl/src"/>
       <UnitOutputDirectory Value="../../_tmp/build"/>
     </SearchPaths>
     <Parsing>

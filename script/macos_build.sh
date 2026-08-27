@@ -86,6 +86,19 @@ if [ -n "${FT_LINK}" ]; then
   BASE+=( "${FT_LINK}" )
 fi
 
+# --- Native pinch-to-zoom bridge (macOS only): compile fp_magnify.m and make
+#     it findable by {$link fp_magnify.o} in FPMagnifyBridge.pas. Placed in the
+#     unit output dir and added to -Fl so the FPC linker resolves it. ---
+MAGNIFY_OBJ="${BUILD_DIR}/fp_magnify.o"
+if [ ! -f "${MAGNIFY_OBJ}" ]; then
+  echo "Compiling native magnify bridge..."
+  clang -c -O2 -arch "$(uname -m)" -mmacosx-version-min=11.0 -fobjc-arc \
+    -framework Cocoa \
+    -o "${MAGNIFY_OBJ}" \
+    "${PROJECT_DIR}/apps/ofdviewer/src/fp_magnify.m"
+fi
+BASE+=( "--opt=-Fl${BUILD_DIR}" )
+
 for t in "${TARGETS[@]}"; do
   echo "Building: ${t}"
   if ! "${LAZBUILD}" "${BASE[@]}" "${t}" 2>&1 | tee -a "${LOG}"; then

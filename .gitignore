@@ -53,3 +53,7 @@ apps/ofdviewer/src/icons/*.ico
 # Backup files
 *.bak2
 *.bak
+
+# FPC temp assembly / build script (produced when compiling bridge .m/.pas in src)
+*.s
+ppas.sh

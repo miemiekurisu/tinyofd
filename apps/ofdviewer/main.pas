@@ -11,7 +11,11 @@ uses
   fpimage, Messages, Printers, LazLogger,
   ofdcore, ofd_document, ofd_page_view, ofd_thumbnail_view,
   ofd_find_bar, ofd_document_view, ofd_text_search, ofd_config,
-  ofd_goto_dialog, ofd_tab_strip;
+  ofd_goto_dialog, ofd_tab_strip
+{$IFDEF DARWIN}
+  , FPMagnifyBridge
+{$ENDIF}
+  ;
 
 {$ifdef darwin}
 const gModifierKey = ssMeta;
@@ -133,6 +137,10 @@ type
     FFindText: String;
     FInitialized: Boolean;
     FRotationAngle: Integer;
+{$IFDEF DARWIN}
+    FLastMagnifyView: TObject;
+    FMagnifyTimer: TTimer;
+{$ENDIF}
     FFolderFiles: TStringList;
     FFolderIndex: Integer;
     FPrevLeft, FPrevTop, FPrevWidth, FPrevHeight: Integer;
@@ -205,6 +213,9 @@ type
     procedure DoFolderPrev;
     procedure DoFolderNext;
     procedure DoExternalViewer;
+{$IFDEF DARWIN}
+    procedure MagnifyTimerEvent(Sender: TObject);
+{$ENDIF}
     procedure DoFitPage;
     procedure DoFitWidth;
     procedure DoActualSize;
@@ -316,9 +327,20 @@ end;
 { Build a UTF-8 string for a PUA icon glyph (Segoe MDL2 Assets on Windows,
   bundled Material Icons on macOS). LCL renders control text via UTF8ToUTF16,
   so the glyph is preserved. }
-function IconGlyph(const ACode: Word): String;
+function IconGlyph(const ACode: Cardinal): String;
+var
+  WS: WideString;
 begin
-  Result := UTF8Encode(WideString(WideChar(ACode)));
+  if ACode <= $FFFF then
+    WS := WideString(WideChar(ACode))
+  else
+  begin
+    { Encode a supplementary-plane codepoint as a UTF-16 surrogate pair so
+      emoji (e.g. U+1F4C1 📁) can be rendered via the system emoji font. }
+    WS := WideString(WideChar($D800 + ((ACode - $10000) shr 10)));
+    WS := WS + WideChar($DC00 + ((ACode - $10000) and $3FF));
+  end;
+  Result := UTF8Encode(WS);
 end;
 
 type
@@ -340,19 +362,19 @@ function ToolbarIconCode(AIcon: TOFDToolbarIcon): Word;
 begin
 {$IFDEF DARWIN}
   case AIcon of
-    tiOpen:   Result := $E89E; { Material: open_in_new }
+    tiOpen:   Result := $E2C7; { Material: folder }
     tiPrev:   Result := $E5CB; { Material: chevron_left }
     tiNext:   Result := $E5CC; { Material: chevron_right }
-    tiZoomIn: Result := $E8A3; { Material: zoom_in }
-    tiZoomOut:Result := $E8A4; { Material: zoom_out }
+    tiZoomIn: Result := $E145; { Material: add (+) }
+    tiZoomOut:Result := $E15B; { Material: remove (-) }
   end;
 {$ELSE}
   case AIcon of
-    tiOpen:   Result := $E8E5; { MDL2: OpenFile }
+    tiOpen:   Result := $E8B7; { MDL2: Folder }
     tiPrev:   Result := $E76B; { MDL2: ChevronLeft }
     tiNext:   Result := $E76C; { MDL2: ChevronRight }
-    tiZoomIn: Result := $E8A3; { MDL2: ZoomIn }
-    tiZoomOut:Result := $E71F; { MDL2: ZoomOut }
+    tiZoomIn: Result := $E710; { MDL2: Add (+) }
+    tiZoomOut:Result := $E738; { MDL2: Remove (-) }
   end;
 {$ENDIF}
 end;
@@ -799,12 +821,73 @@ end;
 
 procedure TViewerMainForm.FormDestroy(Sender: TObject);
 begin
+{$IFDEF DARWIN}
+  if Assigned(FMagnifyTimer) then
+  begin
+    FMagnifyTimer.Enabled := False;
+    FMagnifyTimer.Free;
+    FMagnifyTimer := nil;
+  end;
+  if Assigned(FLastMagnifyView) and (FLastMagnifyView is TWinControl) then
+    if TWinControl(FLastMagnifyView).HandleAllocated then
+      FPUninstallMagnifyHandler(Pointer(TWinControl(FLastMagnifyView).Handle));
+  FLastMagnifyView := nil;
+{$ENDIF}
   if Assigned(FSearchResults) then FSearchResults.Free;
   FThumbsBtnsList.Free;
   { Frees every open tab (sheets, views, documents, folder lists). The global
     FFolderFiles now points into the active tab and must NOT be freed here. }
   FTabList.Free;
 end;
+
+{$IFDEF DARWIN}
+{ Native pinch-to-zoom callback. AContext is the view that received the
+  gesture. We route through the view's public Zoom setter so OnZoomChange
+  fires and keeps FZoomLevel / the zoom-% box / status bar in sync with the
+  toolbar +/- buttons. AMagnification is a per-event delta: +0.02 ~ +2%. }
+procedure FPMagnifyCallbackProc(AContext: Pointer; AMagnification: Double;
+  ALocationX, ALocationY: Double); cdecl;
+var
+  View: TObject;
+  NewZoom: Double;
+begin
+  if (AContext = nil) or (AMagnification = 0.0) then Exit;
+  View := TObject(AContext);
+  if View is TOFDPageView then
+  begin
+    NewZoom := TOFDPageView(View).Zoom * (1.0 + AMagnification);
+    if NewZoom < 0.10 then NewZoom := 0.10;
+    if NewZoom > 64.0 then NewZoom := 64.0;
+    TOFDPageView(View).Zoom := NewZoom;
+  end
+  else if View is TOFDDocumentView then
+  begin
+    NewZoom := TOFDDocumentView(View).Zoom * (1.0 + AMagnification);
+    if NewZoom < 0.10 then NewZoom := 0.10;
+    if NewZoom > 64.0 then NewZoom := 64.0;
+    TOFDDocumentView(View).Zoom := NewZoom;
+  end;
+end;
+
+{ Self-healing pinch-zoom install. Runs on a timer: installs the native magnify
+  handler on whichever view is currently active (single-page or continuous), and
+  re-installs automatically whenever the active view changes (tab switch,
+  single/continuous toggle). Handle must be allocated first, so we retry on
+  subsequent ticks until the view is realized. On LCL Cocoa, Application.OnIdle
+  does not fire reliably, so a TTimer (an NSTimer in the run loop) is used
+  instead. }
+procedure TViewerMainForm.MagnifyTimerEvent(Sender: TObject);
+var
+  ActiveView: TWinControl;
+begin
+  if FContinuous then ActiveView := FDocView else ActiveView := FPageView;
+  if not Assigned(ActiveView) then Exit;
+  if not ActiveView.HandleAllocated then Exit;
+  if ActiveView = FLastMagnifyView then Exit;
+  FPInstallMagnifyHandler(Pointer(ActiveView.Handle), @FPMagnifyCallbackProc, ActiveView);
+  FLastMagnifyView := ActiveView;
+end;
+{$ENDIF}
 
 procedure TViewerMainForm.FormShow(Sender: TObject);
 var
@@ -838,6 +921,18 @@ begin
     UpdateStatusBar;
     ApplyRoundedWindowCorners(Handle);
     LayoutPageIndicator;
+{$IFDEF DARWIN}
+    { Start the pinch-zoom installer timer; it lazily attaches to the active
+      view once its native handle is allocated. A timer (not OnIdle) because
+      LCL Cocoa's idle loop does not fire OnIdle reliably. }
+    if not Assigned(FMagnifyTimer) then
+    begin
+      FMagnifyTimer := TTimer.Create(Self);
+      FMagnifyTimer.Interval := 250;
+      FMagnifyTimer.OnTimer := @MagnifyTimerEvent;
+    end;
+    FMagnifyTimer.Enabled := True;
+{$ENDIF}
     DebugLog('FormShow OK');
   except
     on E: Exception do

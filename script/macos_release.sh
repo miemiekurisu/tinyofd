@@ -61,6 +61,18 @@ if [ ! -f "${FT_LIB_DIR}/libfreetype.a" ]; then
 fi
 FT_LINK="--opt=-Fl${FT_LIB_DIR}"
 
+# --- Native pinch-to-zoom bridge (macOS only): compile fp_magnify.m and make
+#     it findable by {$link fp_magnify.o} in FPMagnifyBridge.pas. Placed in the
+#     unit output dir and added to -Fl so the FPC linker resolves it. ---
+MAGNIFY_OBJ="${BUILD_DIR}/fp_magnify.o"
+if [ ! -f "${MAGNIFY_OBJ}" ]; then
+  echo "Compiling native magnify bridge..."
+  clang -c -O2 -arch "$(uname -m)" -mmacosx-version-min=11.0 -fobjc-arc \
+    -framework Cocoa \
+    -o "${MAGNIFY_OBJ}" \
+    "${PROJECT_DIR}/apps/ofdviewer/src/fp_magnify.m"
+fi
+
 WIDGETSET="${WIDGETSET:-cocoa}"
 
 echo "=== TinyOFD macOS RELEASE build ==="
@@ -85,6 +97,7 @@ BASE=( -B --widgetset="${WIDGETSET}" \
        --opt=-O2 --opt=-XX --opt=-Xs --opt=-dRELEASE \
        --opt=-k-ld_classic --opt=-k-framework --opt=-kUserNotifications )
 BASE+=( "${FT_LINK}" )
+BASE+=( "--opt=-Fl${BUILD_DIR}" )
 
 for t in "${TARGETS[@]}"; do
   echo "Building: ${t}"

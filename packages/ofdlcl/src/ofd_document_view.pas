@@ -47,6 +47,7 @@ type
     FLastNotifiedPage: Integer;
     FWorker: TOFDPageRenderWorker;
     FWheelAccum: Integer;
+    FHorzWheelAccum: Integer;
     FRotationAngle: Integer;
     FRotCache: TObjectList;          { of TOFDRotatedPage; owns entries }
     FTimer: TTimer;
@@ -76,6 +77,7 @@ type
     procedure Resize; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     procedure DoMouseWheel(Sender: TObject; Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+    function DoMouseWheelHorz(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean; override;
     procedure KeyDown(var Key: Word; Shift: TShiftState); override;
   public
     constructor Create(AOwner: TComponent); override;
@@ -1181,6 +1183,26 @@ begin
     UpdateCurrentPageFromScroll;
     Handled := True;
   end;
+end;
+
+function TOFDDocumentView.DoMouseWheelHorz(Shift: TShiftState;
+  WheelDelta: Integer; MousePos: TPoint): Boolean;
+var
+  ScrollDelta: Integer;
+begin
+  Result := False;
+  if WheelDelta = 0 then Exit;
+  { Horizontal wheel / two-finger trackpad swipe. Mirror the vertical branch's
+    line-based scrolling: accumulate fractional deltas for smooth, proportional
+    panning. NOTE: LCL negates scrollingDeltaX (wheelDelta = -deltaX*120), so the
+    sign here is inverted vs. the vertical branch to keep gesture-to-content
+    direction consistent with vertical scrolling. }
+  FHorzWheelAccum := FHorzWheelAccum + WheelDelta;
+  ScrollDelta := (FHorzWheelAccum div 120) * OFDGetWheelScrollLines * cOFDWheelLinePx;
+  FHorzWheelAccum := FHorzWheelAccum mod 120;
+
+  HorzScrollBar.Position := HorzScrollBar.Position + ScrollDelta;
+  Result := True;
 end;
 
 procedure TOFDDocumentView.KeyDown(var Key: Word; Shift: TShiftState);

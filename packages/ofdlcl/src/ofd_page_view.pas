@@ -85,6 +85,7 @@ type
     FScrollX: Integer;
     FScrollY: Integer;
     FWheelAccum: Integer;
+    FHorzWheelAccum: Integer;
     FZoomFactor: Double;
     FPageWidthPx: Integer;
     FPageHeightPx: Integer;
@@ -112,6 +113,8 @@ type
     procedure RotateBitmap270(const ASource: TBitmap; out ADest: TBitmap);
     procedure DoMouseWheel(Sender: TObject; Shift: TShiftState;
       WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+    function DoMouseWheelHorz(Shift: TShiftState; WheelDelta: Integer;
+      MousePos: TPoint): Boolean; override;
     procedure EnsureInitialized;
     procedure InvalidateCache;
     procedure SBVertChange(Sender: TObject);
@@ -727,6 +730,32 @@ begin
     Invalidate;
     Handled := True;
   end;
+end;
+
+function TOFDPageView.DoMouseWheelHorz(Shift: TShiftState;
+  WheelDelta: Integer; MousePos: TPoint): Boolean;
+var
+  ScrollDelta: Integer;
+begin
+  Result := False;
+  if WheelDelta = 0 then Exit;
+  { Horizontal wheel / two-finger trackpad swipe. Mirror the vertical branch's
+    line-based scrolling: accumulate fractional deltas so fine trackpad input is
+    not lost, and scroll by (lines x line height) per full notch. NOTE: LCL
+    negates scrollingDeltaX (wheelDelta = -deltaX*120), so the sign here is
+    inverted vs. the vertical branch to keep gesture-to-content direction
+    consistent with vertical scrolling. }
+  FHorzWheelAccum := FHorzWheelAccum + WheelDelta;
+  ScrollDelta := (FHorzWheelAccum div 120) * OFDGetWheelScrollLines * cOFDWheelLinePx;
+  FHorzWheelAccum := FHorzWheelAccum mod 120;
+
+  FScrollX := FScrollX + ScrollDelta;
+  if FScrollX < 0 then FScrollX := 0;
+  if Assigned(FPage) and (FScrollX > GetZoomedWidth - ClientWidth) then
+    FScrollX := Math.Max(0, GetZoomedWidth - ClientWidth);
+  HorzScrollBar.Position := FScrollX;
+  Invalidate;
+  Result := True;
 end;
 
 procedure TOFDPageView.DoPaint;
