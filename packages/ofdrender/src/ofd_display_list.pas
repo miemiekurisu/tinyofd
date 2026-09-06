@@ -68,6 +68,12 @@ type
     ImageData: TBytes;
     ImageMatrix: TOFDMatrix;
     Alpha: Double;
+    { Optional stable identity of the image data (e.g. the resolved package
+      internal path set by the page compiler). When non-empty the render
+      service keys its decoded-image cache by this string instead of hashing
+      the full TBytes (an O(N) scan per image command). Producers that do not
+      know a stable identity leave it empty and the content hash is used. }
+    CacheKey: String;
     constructor Create;
     destructor Destroy; override;
   end;
@@ -83,6 +89,11 @@ type
     BoundaryW, BoundaryH: Double; { full image/boundary size in mm }
     ClipLeft, ClipTop, ClipWidth, ClipHeight: Double; { clip region in mm, rel. boundary }
     Alpha: Double;
+    { Stable per-document identity of the image bytes (e.g. the resolved ZIP
+      path). Optional: when empty the render service falls back to the content
+      hash of ImageData. Lets the decoded-image cache skip the N-byte hash per
+      ImageRect lookup. }
+    CacheKey: String;
     constructor Create;
     destructor Destroy; override;
   end;
@@ -238,10 +249,12 @@ type
       AColor: TOFDColor; AAlpha: Double);
     procedure AddStrokePath(APath: TOFDPathCommands; AFillRule: TOFDFillRule;
       AColor: TOFDColor; AAlpha: Double; ALineWidth: Double);
-    procedure AddImage(AImageData: TBytes; AMatrix: TOFDMatrix; AAlpha: Double);
+    procedure AddImage(AImageData: TBytes; AMatrix: TOFDMatrix; AAlpha: Double;
+      const ACacheKey: String = '');
     procedure AddImageRect(AImageData: TBytes; const ADestMatrix: TOFDMatrix;
       ABoundaryW, ABoundaryH: Double;
-      AClipLeft, AClipTop, AClipWidth, AClipHeight: Double; AAlpha: Double);
+      AClipLeft, AClipTop, AClipWidth, AClipHeight: Double; AAlpha: Double;
+      const ACacheKey: String = '');
     procedure AddSeal(const ASealData: TBytes; const ADestMatrix: TOFDMatrix);
     procedure AddTransform(AMatrix: TOFDMatrix);
     procedure AddFillColor(AColor: TOFDColor);
@@ -611,7 +624,7 @@ begin
 end;
 
 procedure TOFDDisplayList.AddImage(AImageData: TBytes;
-  AMatrix: TOFDMatrix; AAlpha: Double);
+  AMatrix: TOFDMatrix; AAlpha: Double; const ACacheKey: String = '');
 var
   Cmd: TOFDImageCommand;
 begin
@@ -619,12 +632,14 @@ begin
   Cmd.ImageData := AImageData;
   Cmd.ImageMatrix := AMatrix;
   Cmd.Alpha := AAlpha;
+  Cmd.CacheKey := ACacheKey;
   FCommands.Add(Cmd);
 end;
 
 procedure TOFDDisplayList.AddImageRect(AImageData: TBytes;
   const ADestMatrix: TOFDMatrix; ABoundaryW, ABoundaryH: Double;
-  AClipLeft, AClipTop, AClipWidth, AClipHeight: Double; AAlpha: Double);
+  AClipLeft, AClipTop, AClipWidth, AClipHeight: Double; AAlpha: Double;
+  const ACacheKey: String = '');
 var
   Cmd: TOFDImageRectCommand;
 begin
@@ -638,6 +653,7 @@ begin
   Cmd.ClipWidth := AClipWidth;
   Cmd.ClipHeight := AClipHeight;
   Cmd.Alpha := AAlpha;
+  Cmd.CacheKey := ACacheKey;
   FCommands.Add(Cmd);
 end;
 

@@ -17,12 +17,28 @@ interface
 
 uses
   Classes, SysUtils, SyncObjs, Contnrs, Graphics, Forms,
-  ofd_document, ofd_page, ofd_resources, ofd_page_compiler, ofd_display_list, ofd_render_service,
-  ofd_surface, ofd_surface_presenter, ofd_render_diagnostics, ofd_render_outcome,
-  ofd_font_engine_intf;
+  ofd_types, ofd_document, ofd_page, ofd_resources, ofd_page_compiler,
+  ofd_display_list, ofd_render_service, ofd_surface, ofd_surface_presenter,
+  ofd_render_diagnostics, ofd_render_outcome, ofd_font_engine_intf;
 
 const
   cMaxWorkerCache = 24; { upper bound on cached page bitmaps }
+  { Byte budget for the worker page cache (32bpp RGBA estimate). Entry-count
+    capping alone lets 24 large page bitmaps stay resident ~GB-scale; entries
+    are additionally evicted LRU-oldest-first until the estimated bytes fit. }
+  cMaxWorkerCacheBytes = 64 * 1024 * 1024;
+  { Upper bound on CACHED PARSED pages (Content.xml already parsed to the
+    object model). Re-rendering a page at a new width (e.g. per zoom step) used
+    to re-parse Content.xml; the parse result is small next to the page
+    bitmaps, so up to 8 parsed pages are kept. TOFDPage.Load assigns the
+    parsed content once and the render pipeline (compiler + service) treats
+    page data read-only afterwards, so reuse across renders is safe. }
+  cMaxWorkerParsedPages = 8;
+
+{ Shared, thread-safe render error log (all writers, worker + UI threads).
+  Writes "YYYY-MM-DD HH:NN:SS [tag] msg" to render_errors.log next to the exe
+  when not built with -dRELEASE. Silently ignores I/O failures. }
+procedure AppendRenderErrorLog(const ATag, AMsg: String);
 
 type
   TOFDRenderRequest = record
@@ -37,6 +53,14 @@ type
     TargetWidth: Integer;
     Bitmap: TBitmap;
     LastAccess: TDateTime;
+  end;
+
+  { Entry of the worker's parsed-page cache: a loaded TOFDPage reused across
+    render requests for the same page index. }
+  TParsedPageEntry = class
+  public
+    PageIndex: Integer;
+    Page: TOFDPage;
   end;
 
   { Font data provider bound to the worker's own document. }
@@ -58,6 +82,9 @@ type
     FSvc: TOFDRenderService;
     FLock: TCriticalSection;      { guards FCache }
     FCache: TObjectList;          { of TOFDCachedPage }
+    { Parsed-page LRU cache (worker thread only, see cMaxWorkerParsedPages).
+      Index 0 = oldest (eviction candidate), Count-1 = most recently used. }
+    FParsedPages: TObjectList;    { of TParsedPageEntry, owns entries + pages }
     FQueueLock: TCriticalSection; { guards FQueue + FShutdown }
     FQueue: array of TOFDRenderRequest;
     FShutdown: Boolean;
@@ -65,6 +92,16 @@ type
     FHasPendingRender: Boolean;   { guarded by FLock: set after a render completes }
     FOnPageRendered: TNotifyEvent;
     procedure EvictIfNeeded;
+    { Rebuild FQueue dropping tombstones. Must be called with FQueueLock held. }
+    procedure CompactQueue;
+    { Sum of estimated bitmap bytes currently cached. Must be called with
+      FLock held. }
+    function TotalCacheBytes: Int64;
+    { Parsed-page cache helpers (worker thread only). FindParsedPage returns
+      the cached page for APageIndex and marks it most-recently-used, or nil;
+      StoreParsedPage takes ownership of APage after an entry cap eviction. }
+    function FindParsedPage(APageIndex: Integer): TOFDPage;
+    procedure StoreParsedPage(APageIndex: Integer; APage: TOFDPage);
   protected
     procedure Execute; override;
     function RenderPageToBitmap(APageIndex, ATargetWidth: Integer): TBitmap;
@@ -79,12 +116,16 @@ type
       synchronously on the UI thread so the first page is never a white blank).
       Takes ownership of ABitmap. }
     procedure InjectCached(APageIndex, ATargetWidth: Integer; ABitmap: TBitmap);
-    { Return the cached bitmap for a page (caller must NOT free it), or nil. }
+    { Return a COPY of the cached bitmap for a page, owned by the caller, or
+      nil. The copy is made under the lock so eviction on the worker thread can
+      never free a bitmap the UI thread is still reading. }
     function GetCached(APageIndex, ATargetWidth: Integer): TBitmap;
-    { Return a cached bitmap for the page at ANY width (caller must NOT free
-      it), or nil. Used to show a stretched placeholder while a new-width
+    { Return a COPY of a cached bitmap for the page at ANY width, owned by the
+      caller, or nil. Used to show a stretched placeholder while a new-width
       render is in flight (e.g. after a zoom). }
     function GetAnyCached(APageIndex: Integer): TBitmap;
+    { True if a bitmap for the page is already cached at this width. }
+    function IsCached(APageIndex, ATargetWidth: Integer): Boolean;
     { True if a bitmap for the page is already cached at any width. }
     function HasAnyCached(APageIndex: Integer): Boolean;
     { Atomically read-and-clear the "render completed" flag. Called periodically
@@ -92,11 +133,68 @@ type
       notification (avoids Synchronize/QueueAsyncCall races on Cocoa). }
     function ConsumePendingRender: Boolean;
     procedure Shutdown;
+    { NOTE (dead code): FOnPageRendered is intentionally NOT fired. The views
+      poll ConsumePendingRender on a timer instead of using cross-thread event
+      callbacks (Synchronize/QueueAsyncCall can deadlock or crash on some
+      widgetsets, e.g. Cocoa). The property is retained for API compatibility. }
     property OnPageRendered: TNotifyEvent read FOnPageRendered write FOnPageRendered;
     property Document: TOFDDocument read FDoc;
   end;
 
 implementation
+
+{ Shared render error log (used by the worker, TOFDPageView and
+  TOFDDocumentView). A unit-level critical section serializes Append-file
+  writes so concurrent threads cannot interleave/corrupt the log file. }
+var
+  RenderLogLock: TCriticalSection = nil;
+
+procedure AppendRenderErrorLog(const ATag, AMsg: String);
+{$ifndef RELEASE}
+const
+  { Rotate once per run when the log exceeds this size: keep the most recent
+    content in .old and start fresh, so a long debug session cannot grow the
+    file unbounded. }
+  cRenderErrorLogMaxBytes = 2 * 1024 * 1024;
+var
+  F: TextFile;
+  LogPath, OldPath: String;
+  SR: TSearchRec;
+{$endif}
+begin
+{$ifndef RELEASE}
+  try
+    LogPath := ExtractFilePath(Application.ExeName) + 'render_errors.log';
+    RenderLogLock.Enter;
+    try
+      { Size-bounded log: rotate current -> .old when too large (checked before
+        every append; O(1) stat, no timers). }
+      if (FindFirst(LogPath, faAnyFile, SR) = 0) then
+      begin
+        FindClose(SR);
+        if SR.Size > cRenderErrorLogMaxBytes then
+        begin
+          OldPath := LogPath + '.old';
+          if FileExists(OldPath) then
+            DeleteFile(OldPath);
+          RenameFile(LogPath, OldPath);
+        end;
+      end;
+      AssignFile(F, LogPath);
+      if FileExists(LogPath) then Append(F) else Rewrite(F);
+      if ATag <> '' then
+        WriteLn(F, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now),
+          ' [', ATag, '] ', AMsg)
+      else
+        WriteLn(F, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now), ' ', AMsg);
+      CloseFile(F);
+    finally
+      RenderLogLock.Leave;
+    end;
+  except
+  end;
+{$endif}
+end;
 
 { TWorkerFontProvider }
 
@@ -136,6 +234,7 @@ begin
   FQueueLock := TCriticalSection.Create;
   FEvent := TEvent.Create(nil, True, False, '');
   FCache := TObjectList.Create(True);
+  FParsedPages := TObjectList.Create(True);
   SetLength(FQueue, 0);
   FShutdown := False;
 end;
@@ -147,6 +246,10 @@ begin
   FreeAndNil(FQueueLock);
   FreeAndNil(FLock);
   FreeAndNil(FCache);
+  { Free parsed pages BEFORE the document: TOFDPage holds a document pointer
+    but does not own it; order avoids the pages outliving FDoc if page
+    destructors ever touch it. }
+  FreeAndNil(FParsedPages);
   FreeAndNil(FDoc);
   inherited Destroy;
 end;
@@ -198,7 +301,15 @@ begin
       if (C.PageIndex = APageIndex) and (C.TargetWidth = ATargetWidth) then
       begin
         C.LastAccess := Now;
-        Result := C.Bitmap;
+        { Return an owned copy (made under the lock) so EvictIfNeeded on the
+          worker thread can never free a bitmap the caller still reads. }
+        Result := TBitmap.Create;
+        try
+          Result.Assign(C.Bitmap);
+        except
+          Result.Free;
+          Result := nil;
+        end;
         Exit;
       end;
     end;
@@ -221,7 +332,36 @@ begin
       if C.PageIndex = APageIndex then
       begin
         C.LastAccess := Now;
-        Result := C.Bitmap;
+        { Owned copy under the lock (see GetCached). }
+        Result := TBitmap.Create;
+        try
+          Result.Assign(C.Bitmap);
+        except
+          Result.Free;
+          Result := nil;
+        end;
+        Exit;
+      end;
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TOFDPageRenderWorker.IsCached(APageIndex, ATargetWidth: Integer): Boolean;
+var
+  I: Integer;
+  C: TOFDCachedPage;
+begin
+  Result := False;
+  FLock.Enter;
+  try
+    for I := 0 to FCache.Count - 1 do
+    begin
+      C := TOFDCachedPage(FCache[I]);
+      if (C.PageIndex = APageIndex) and (C.TargetWidth = ATargetWidth) then
+      begin
+        Result := True;
         Exit;
       end;
     end;
@@ -265,19 +405,29 @@ end;
 
 procedure TOFDPageRenderWorker.Request(APageIndex, ATargetWidth: Integer);
 var
-  I, N: Integer;
+  I, N, Tombstones: Integer;
 begin
   if APageIndex < 0 then Exit;
   { Already cached at this width? }
-  if GetCached(APageIndex, ATargetWidth) <> nil then Exit;
+  if IsCached(APageIndex, ATargetWidth) then Exit;
   FQueueLock.Enter;
   try
     if FShutdown then Exit;
     { Already queued at this width? }
+    Tombstones := 0;
     for I := 0 to Length(FQueue) - 1 do
-      if FQueue[I].Valid and (FQueue[I].PageIndex = APageIndex) and
-         (FQueue[I].TargetWidth = ATargetWidth) then
-        Exit;
+      if FQueue[I].Valid then
+      begin
+        if (FQueue[I].PageIndex = APageIndex) and
+           (FQueue[I].TargetWidth = ATargetWidth) then
+          Exit;
+      end
+      else
+        Inc(Tombstones);
+    { Tombstone compaction (A5): rebuild the queue before appending so a long
+      session cannot accumulate an unbounded tombstone list. }
+    if OFDShouldCompactQueue(Tombstones, Length(FQueue)) then
+      CompactQueue;
     N := Length(FQueue);
     SetLength(FQueue, N + 1);
     FQueue[N].PageIndex := APageIndex;
@@ -304,16 +454,34 @@ begin
   end;
 end;
 
+{ Must be called with FLock held. Sum of estimated bitmap bytes currently
+  cached (same 32bpp estimate as ofd_types.OFDBitmapBytes, independent of the
+  bitmaps' actual pixel format). }
+function TOFDPageRenderWorker.TotalCacheBytes: Int64;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to FCache.Count - 1 do
+    Result := Result + OFDBitmapBytes(
+      TOFDCachedPage(FCache[I]).Bitmap.Width,
+      TOFDCachedPage(FCache[I]).Bitmap.Height);
+end;
+
 { Must be called with FLock held. Keeps the worker's page cache bounded so a
   long session scrolling/zooming a large document cannot grow memory without
-  limit. Evicts the least-recently-accessed entries. }
+  limit. Evicts the least-recently-accessed entries until the cache is within
+  both the entry-count cap and the byte budget. }
 procedure TOFDPageRenderWorker.EvictIfNeeded;
 var
   I, OldestIdx: Integer;
   OldestTime: TDateTime;
 begin
-  while FCache.Count > cMaxWorkerCache do
+  while FCache.Count > 0 do
   begin
+    if (FCache.Count <= cMaxWorkerCache) and
+       (TotalCacheBytes <= cMaxWorkerCacheBytes) then
+      Break;
     OldestIdx := 0;
     OldestTime := TOFDCachedPage(FCache[0]).LastAccess;
     for I := 1 to FCache.Count - 1 do
@@ -326,28 +494,36 @@ begin
   end;
 end;
 
-procedure TOFDPageRenderWorker.LogWorkerError(const AMsg: String);
-{$ifndef RELEASE}
+{ Must be called with FQueueLock held. Drops invalid (dequeued/tombstone)
+  entries and shrinks the dynamic array back, so a long session that requests
+  many pages does not keep an ever-growing tombstone list. Only compacts when
+  strictly more than half of the entries are tombstones (OFDShouldCompactQueue)
+  to amortize the rebuild. }
+procedure TOFDPageRenderWorker.CompactQueue;
 var
-  F: TextFile;
-  LogPath: String;
-{$endif}
+  I, N: Integer;
+begin
+  N := 0;
+  for I := 0 to Length(FQueue) - 1 do
+    if FQueue[I].Valid then
+    begin
+      FQueue[N] := FQueue[I];
+      Inc(N);
+    end;
+  SetLength(FQueue, N);
+end;
+
+procedure TOFDPageRenderWorker.LogWorkerError(const AMsg: String);
 begin
 {$ifndef RELEASE}
-  try
-    LogPath := ExtractFilePath(Application.ExeName) + 'render_errors.log';
-    AssignFile(F, LogPath);
-    if FileExists(LogPath) then Append(F) else Rewrite(F);
-    WriteLn(F, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now), ' [worker] ', AMsg);
-    CloseFile(F);
-  except
-  end;
+  AppendRenderErrorLog('worker', AMsg);
 {$endif}
 end;
 
 function TOFDPageRenderWorker.RenderPageToBitmap(APageIndex, ATargetWidth: Integer): TBitmap;
 var
   Page: TOFDPage;
+  PageCached: Boolean;
   Compiler: TOFDPageCompiler;
   DL: TOFDDisplayList;
   Svc: TOFDRenderService;
@@ -357,9 +533,29 @@ var
 begin
   Result := nil;
   if not Assigned(FDoc) then Exit;
-  Page := TOFDPage.Create(FDoc, FDoc.GetPageEntryByIndex(APageIndex));
+  { Reuse the parsed page across render requests (per index). TOFDPage.Load
+    parses Content.xml exactly once for a project lifetime of requests; the
+    compiler/service only read page data. Pages that failed to load are NOT
+    cached: Load() exits early on a non-Unloaded state, so an error state page
+    would otherwise never recover on retry. }
+  Page := FindParsedPage(APageIndex);
+  PageCached := Assigned(Page);
+  if not PageCached then
+  begin
+    Page := TOFDPage.Create(FDoc, FDoc.GetPageEntryByIndex(APageIndex));
+    try
+      Page.Load;
+    except
+      Page.Free;
+      raise;
+    end;
+    if Page.IsLoaded then
+    begin
+      StoreParsedPage(APageIndex, Page);
+      PageCached := True;
+    end;
+  end;
   try
-    Page.Load;
     Compiler := TOFDPageCompiler.Create(FDoc, APageIndex, GlobalDiagLogger);
     try
       DL := Compiler.Compile(Page);
@@ -386,8 +582,38 @@ begin
       Compiler.Free;
     end;
   finally
-    Page.Free;
+    if not PageCached then
+      Page.Free;
   end;
+end;
+
+function TOFDPageRenderWorker.FindParsedPage(APageIndex: Integer): TOFDPage;
+var
+  I: Integer;
+begin
+  Result := nil;
+  for I := 0 to FParsedPages.Count - 1 do
+    if TParsedPageEntry(FParsedPages[I]).PageIndex = APageIndex then
+    begin
+      { Mark most-recently-used (eviction scans from index 0). }
+      FParsedPages.Move(I, FParsedPages.Count - 1);
+      Result := TParsedPageEntry(FParsedPages[FParsedPages.Count - 1]).Page;
+      Exit;
+    end;
+end;
+
+procedure TOFDPageRenderWorker.StoreParsedPage(APageIndex: Integer; APage: TOFDPage);
+var
+  E: TParsedPageEntry;
+begin
+  { Evict the least-recently-used entries while at cap (index 0 is oldest;
+    hits/inserts go to the end). }
+  while OFDParsedPageShouldEvict(FParsedPages.Count, cMaxWorkerParsedPages) do
+    FParsedPages.Delete(0);
+  E := TParsedPageEntry.Create;
+  E.PageIndex := APageIndex;
+  E.Page := APage;
+  FParsedPages.Add(E);
 end;
 
 procedure TOFDPageRenderWorker.Execute;
@@ -488,5 +714,11 @@ begin
   FSvc.Free;
   FSvc := nil;
 end;
+
+initialization
+  RenderLogLock := TCriticalSection.Create;
+
+finalization
+  FreeAndNil(RenderLogLock);
 
 end.

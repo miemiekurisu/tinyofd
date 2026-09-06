@@ -30,6 +30,8 @@ type
     procedure TestOpenStream_NonExistent;
     procedure TestOpen_NonExistent;
     procedure TestIsOpen_InitialState;
+    procedure TestExtractDir_UniqueAcrossOpens;
+    procedure TestExtractDir_CleanedAfterClose;
   end;
 
 implementation
@@ -363,6 +365,53 @@ begin
   Pkg := TOFDPackage.Create;
   try
     CheckFalse(Pkg.IsOpen, 'initial state is closed');
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestExtractDir_UniqueAcrossOpens;
+var
+  Pkg1, Pkg2: TOFDPackage;
+  Dir1, Dir2: String;
+begin
+  { Regression: two packages opened within the same GetTickCount tick must
+    not collide on the extract dir name (process-wide seq suffix). }
+  Pkg1 := TOFDPackage.Create;
+  Pkg2 := TOFDPackage.Create;
+  try
+    Pkg1.Open(TestFile);
+    Dir1 := Pkg1.ExtractDir;
+    CheckTrue(Dir1 <> '', 'extract dir set after open');
+    CheckTrue(DirectoryExists(Dir1), 'extract dir exists after open');
+    Pkg1.Close;
+
+    Pkg2.Open(TestFile);
+    Dir2 := Pkg2.ExtractDir;
+    CheckTrue(Dir2 <> '', 'second extract dir set');
+    Pkg2.Close;
+
+    CheckTrue(Dir1 <> Dir2,
+      Format('extract dirs differ: %s vs %s', [Dir1, Dir2]));
+  finally
+    Pkg1.Free;
+    Pkg2.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestExtractDir_CleanedAfterClose;
+var
+  Pkg: TOFDPackage;
+  Dir: String;
+begin
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    Dir := Pkg.ExtractDir;
+    CheckTrue(DirectoryExists(Dir), 'extract dir exists before close');
+    Pkg.Close;
+    CheckFalse(DirectoryExists(Dir), 'extract dir removed after close');
+    CheckEquals('', Pkg.ExtractDir, 'extract dir name cleared after close');
   finally
     Pkg.Free;
   end;

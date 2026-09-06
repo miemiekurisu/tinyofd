@@ -80,6 +80,26 @@ type
     procedure TestMatrixFromTranslation;
     procedure TestMatrixFromScale;
     procedure TestMatrixFromRotation;
+    procedure TestOFDBitmapBytes_Normal;
+    procedure TestOFDBitmapBytes_Zero;
+    procedure TestOFDBitmapBytes_Negative;
+    procedure TestOFDBitmapBytes_Extreme;
+    procedure TestOFDComputeRenderZoom_NoneClamped;
+    procedure TestOFDComputeRenderZoom_WidthClamped;
+    procedure TestOFDComputeRenderZoom_HeightClamped;
+    procedure TestOFDComputeRenderZoom_BothClamped;
+    procedure TestOFDComputeRenderZoom_ZeroDims;
+    procedure TestOFDComputeRenderZoom_NegativeZoom;
+    procedure TestOFDShouldCompactQueue_None;
+    procedure TestOFDShouldCompactQueue_All;
+    procedure TestOFDShouldCompactQueue_Half;
+    procedure TestOFDShouldCompactQueue_BelowHalf;
+    procedure TestOFDShouldCompactQueue_Single;
+    procedure TestOFDParsedPageShouldEvict_BelowCapacity;
+    procedure TestOFDParsedPageShouldEvict_AtCapacity;
+    procedure TestOFDParsedPageShouldEvict_OverCapacity;
+    procedure TestOFDParsedPageShouldEvict_ZeroCapacity;
+    procedure TestOFDParsedPageShouldEvict_NegativeCapacity;
   end;
 
 implementation
@@ -1063,6 +1083,160 @@ begin
   CheckEquals(1.0, M[0,1], 1e-10, 'FromRotation 90 [0,1]');
   CheckEquals(-1.0, M[1,0], 1e-10, 'FromRotation 90 [1,0]');
   CheckEquals(Expected, M[1,1], 1e-10, 'FromRotation 90 [1,1]');
+end;
+
+{ --- OFDBitmapBytes --- }
+
+procedure TTestOFDTypes.TestOFDBitmapBytes_Normal;
+begin
+  { 32bpp estimate }
+  CheckEquals(800, OFDBitmapBytes(10, 20), '10x20x4 = 800');
+  CheckEquals(16384 * 16384 * 4, OFDBitmapBytes(16384, 16384),
+    'max render dim bytes');
+end;
+
+procedure TTestOFDTypes.TestOFDBitmapBytes_Zero;
+begin
+  CheckEquals(0, OFDBitmapBytes(0, 100), 'zero width yields 0');
+  CheckEquals(0, OFDBitmapBytes(100, 0), 'zero height yields 0');
+  CheckEquals(0, OFDBitmapBytes(0, 0), 'both zero yields 0');
+end;
+
+procedure TTestOFDTypes.TestOFDBitmapBytes_Negative;
+begin
+  { Malformed dimensions must never inflate a byte budget }
+  CheckEquals(0, OFDBitmapBytes(-10, 100), 'negative width yields 0');
+  CheckEquals(0, OFDBitmapBytes(100, -10), 'negative height yields 0');
+  CheckEquals(0, OFDBitmapBytes(-1, -1), 'both negative yields 0');
+end;
+
+procedure TTestOFDTypes.TestOFDBitmapBytes_Extreme;
+begin
+  { Overflow-safe: the multiply is done in Int64, not 32-bit. }
+  CheckEquals(Int64(16384) * 16384 * 4, OFDBitmapBytes(16384, 16384),
+    'Int64 multiply without 32-bit wrap');
+end;
+
+{ --- OFDComputeRenderZoom --- }
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_NoneClamped;
+begin
+  CheckEquals(2.0, OFDComputeRenderZoom(800, 600, 2.0, 16384), 1e-12,
+    'zoom below cap unchanged');
+  CheckEquals(1.0, OFDComputeRenderZoom(800, 600, 1.0, 16384), 1e-12,
+    'identity zoom unchanged');
+end;
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_WidthClamped;
+begin
+  CheckEquals(1.0, OFDComputeRenderZoom(16384, 600, 2.0, 16384), 1e-12,
+    'width clamped to MAX/width');
+  CheckEquals(16384 / 800, OFDComputeRenderZoom(800, 600, 64.0, 16384), 1e-12,
+    'width clamp formula');
+end;
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_HeightClamped;
+begin
+  { Height clamps using the already width-clamped zoom (sequential, like the
+    original DoPaint logic). }
+  CheckEquals(1.0, OFDComputeRenderZoom(600, 16384, 2.0, 16384), 1e-12,
+    'height clamped');
+end;
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_BothClamped;
+var
+  Z: Double;
+begin
+  Z := OFDComputeRenderZoom(800, 600, 100.0, 16384);
+  CheckTrue(Z > 0, 'positive result');
+  CheckTrue(Abs(Z - 16384 / 800) < 1e-9, 'width dominates clamp');
+  { The resulting surface must be within the cap }
+  CheckTrue(800 * Z <= 16384 + 1e-6, 'width within cap');
+end;
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_ZeroDims;
+begin
+  { Zero dimensions never trigger the clamp; zoom passes through }
+  CheckEquals(4.0, OFDComputeRenderZoom(0, 600, 4.0, 16384), 1e-12,
+    'zero width no clamp');
+  CheckEquals(4.0, OFDComputeRenderZoom(600, 0, 4.0, 16384), 1e-12,
+    'zero height no clamp');
+  CheckEquals(4.0, OFDComputeRenderZoom(0, 0, 4.0, 16384), 1e-12,
+    'both zero no clamp');
+end;
+
+procedure TTestOFDTypes.TestOFDComputeRenderZoom_NegativeZoom;
+begin
+  { Defensive: a negative zoom is clamped to 0 by the helper }
+  CheckEquals(0.0, OFDComputeRenderZoom(600, 600, -1.0, 16384), 1e-12,
+    'negative zoom yields 0');
+end;
+
+{ --- OFDShouldCompactQueue --- }
+
+procedure TTestOFDTypes.TestOFDShouldCompactQueue_None;
+begin
+  CheckFalse(OFDShouldCompactQueue(0, 10), 'no tombstones, no compaction');
+end;
+
+procedure TTestOFDTypes.TestOFDShouldCompactQueue_All;
+begin
+  CheckTrue(OFDShouldCompactQueue(10, 10), 'all tombstones, must compact');
+end;
+
+procedure TTestOFDTypes.TestOFDShouldCompactQueue_Half;
+begin
+  { Strictly more than half: exactly half does not rebuild }
+  CheckFalse(OFDShouldCompactQueue(5, 10), 'exactly half: amortized skip');
+  CheckTrue(OFDShouldCompactQueue(6, 10), 'more than half: compact');
+end;
+
+procedure TTestOFDTypes.TestOFDShouldCompactQueue_BelowHalf;
+begin
+  CheckFalse(OFDShouldCompactQueue(3, 20), 'below half: no compaction');
+end;
+
+procedure TTestOFDTypes.TestOFDShouldCompactQueue_Single;
+begin
+  CheckFalse(OFDShouldCompactQueue(0, 0), 'empty queue: no compaction');
+  CheckFalse(OFDShouldCompactQueue(1, 0), 'contradictory input (tomb > total): false');
+  { A queue that is 100% tombstones is always worth rebuilding }
+  CheckTrue(OFDShouldCompactQueue(1, 1), 'fully tombstoned single entry');
+  CheckFalse(OFDShouldCompactQueue(1, 2), 'tie (1 of 2): amortized skip');
+end;
+
+{ --- OFDParsedPageShouldEvict --- }
+
+procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_BelowCapacity;
+begin
+  CheckFalse(OFDParsedPageShouldEvict(0, 8), 'empty cache, no evict');
+  CheckFalse(OFDParsedPageShouldEvict(1, 8), 'one of 8, no evict');
+  CheckFalse(OFDParsedPageShouldEvict(7, 8), 'one below cap, no evict');
+end;
+
+procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_AtCapacity;
+begin
+  { Boundary: count == capacity must evict one before the next insert }
+  CheckTrue(OFDParsedPageShouldEvict(8, 8), 'at cap evicts');
+  CheckTrue(OFDParsedPageShouldEvict(1, 1), 'cap 1 at count 1 evicts');
+end;
+
+procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_OverCapacity;
+begin
+  CheckTrue(OFDParsedPageShouldEvict(9, 8), 'over cap evicts');
+end;
+
+procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_ZeroCapacity;
+begin
+  { Cache disabled: nothing may stay cached, empty list must not loop. }
+  CheckFalse(OFDParsedPageShouldEvict(0, 0), 'cap 0, empty list: no evict');
+  CheckTrue(OFDParsedPageShouldEvict(1, 0), 'cap 0, one entry: evict');
+end;
+
+procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_NegativeCapacity;
+begin
+  CheckFalse(OFDParsedPageShouldEvict(0, -1), 'negative cap, empty list: no evict');
+  CheckTrue(OFDParsedPageShouldEvict(2, -1), 'negative cap: evict');
 end;
 
 initialization

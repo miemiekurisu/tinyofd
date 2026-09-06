@@ -649,11 +649,13 @@ begin
   inherited Create(AId);
   FPathData := '';
   FAbbreviatedData := '';
-  FLineWidth := 0;
+  { GB/T 33190 table 35: LineWidth default 0.353mm, Stroke default true,
+    Fill default true (FillColor default transparent). }
+  FLineWidth := 0.353;
   FFillColor := '';
   FStrokeColor := '';
   FJoinStyle := '';
-  FFill := False;
+  FFill := True;
   FStroke := True;
   FBlendMode := '';
   FAlpha := 255;
@@ -683,18 +685,18 @@ begin
   if not Assigned(AShdNode) then Exit;
   LocalName := ExtractLocalName(AShdNode.TagName);
 
-  { Reset spec state }
-  FHasAxialShading := False;
-  FHasRadialShading := False;
-  FillChar(FAxialShadingSpec, SizeOf(FAxialShadingSpec), 0);
-  FillChar(FRadialShadingSpec, SizeOf(FRadialShadingSpec), 0);
+  { 只在同一个渐变分支内重置状态：PathObject 的 Fill 和 Stroke 会分别调用
+    本方法，无条件清空会互相清掉对方已解析的渐变（且 FillChar 会泄漏
+    ColorMap 动态数组的引用计数，见 ofd_types 颜色构造函数注释）。
+    分支内 SetLength(ColorMap, 0) 正确释放并重建。Fill 与 Stroke 使用同类
+    渐变时后解析者（Stroke）覆盖共享字段，last-wins。 }
 
   Parts := TStringList.Create;
   try
     Parts.Delimiter := ' ';
     Parts.StrictDelimiter := True;
 
-    if SameText(LocalName, 'AxialShd') then
+    if SameText(LocalName, 'AxialShd') or SameText(LocalName, 'AxialShading') then
     begin
       FHasAxialShading := True;
       FAxialShadingSpec.ColorSpace := cstRGB;
@@ -748,7 +750,7 @@ begin
         end;
       end;
     end
-    else if SameText(LocalName, 'RadialShd') then
+    else if SameText(LocalName, 'RadialShd') or SameText(LocalName, 'RadialShading') then
     begin
       FHasRadialShading := True;
       FRadialShadingSpec.ColorSpace := cstRGB;
@@ -1390,6 +1392,8 @@ begin
       WidthVal := StrToFloatDef(Parts[2], 0);
       HeightVal := StrToFloatDef(Parts[3], 0);
       { Convert to Left/Top/Right/Bottom }
+      { 校验失败会触发二次解析，先释放旧 Boundary 避免泄漏 }
+      FBoundary.Free;
       FBoundary := TOFDBoundary.Create(
         Parts[0], Parts[1],
         FloatToStr(LeftVal + WidthVal),
@@ -2282,10 +2286,13 @@ begin
   LPage := Self;
   with PathObj do
   begin
-    FLineWidth := StrToFloatDef(ANode.GetAttribute('LineWidth'), 0);
+    FLineWidth := StrToFloatDef(ANode.GetAttribute('LineWidth'), 0.353);
     FLineWidthSet := ANode.GetAttribute('LineWidth') <> '';
     FJoinStyle := ANode.GetAttribute('Join');
-    FFill := SameText(ANode.GetAttribute('Fill'), 'true');
+    if ANode.GetAttribute('Fill') = '' then
+      FFill := True
+    else
+      FFill := SameText(ANode.GetAttribute('Fill'), 'true');
     FStroke := ANode.GetAttribute('Stroke') <> 'false';
     FBlendMode := ANode.GetAttribute('BlendMode');
     { GAP-7: Parse Alpha attribute }
@@ -2418,17 +2425,6 @@ begin
       if Assigned(PathNode) then
         FPathData := PathNode.TextContent;
     end;
-
-    { Compat: vector text as PathObject with only a StrokeColor (no Fill/Stroke
-      attrs, no FillColor, no LineWidth) is meant to be a solid glyph. }
-    if (ANode.GetAttribute('Fill') = '') and (ANode.GetAttribute('Stroke') = '')
-       and (FFillColor = '') and (FStrokeColor <> '') and (FLineWidth = 0) then
-    begin
-      FFill := True;
-      FFillColor := FStrokeColor;
-      FFillColorSet := True;
-      FStroke := False;
-    end;
   end;
 
   FObjects.Add(PathObj);
@@ -2452,9 +2448,14 @@ begin
     if Assigned(DataNode) and (DataNode.TextContent <> '') then
       ParseAbbreviatedData(DataNode.TextContent);
 
-    DataNode := ANode.FindChild('PathData');
-    if Assigned(DataNode) and (DataNode.TextContent <> '') then
-      ParseAbbreviatedData(DataNode.TextContent);
+    { 仅当 AbbreviatedData 没有解析出命令时才回退到 PathData，
+      否则二次 ParseAbbreviatedData 会清掉第一次的命令 }
+    if CommandCount = 0 then
+    begin
+      DataNode := ANode.FindChild('PathData');
+      if Assigned(DataNode) and (DataNode.TextContent <> '') then
+        ParseAbbreviatedData(DataNode.TextContent);
+    end;
   end;
 
   FObjects.Add(VS);
@@ -2478,9 +2479,14 @@ begin
     if Assigned(DataNode) and (DataNode.TextContent <> '') then
       ParseAbbreviatedData(DataNode.TextContent);
 
-    DataNode := ANode.FindChild('PathData');
-    if Assigned(DataNode) and (DataNode.TextContent <> '') then
-      ParseAbbreviatedData(DataNode.TextContent);
+    { 仅当 AbbreviatedData 没有解析出命令时才回退到 PathData，
+      否则二次 ParseAbbreviatedData 会清掉第一次的命令 }
+    if CommandCount = 0 then
+    begin
+      DataNode := ANode.FindChild('PathData');
+      if Assigned(DataNode) and (DataNode.TextContent <> '') then
+        ParseAbbreviatedData(DataNode.TextContent);
+    end;
   end;
 
   ALayer.AddChild(VS);
@@ -2945,10 +2951,13 @@ begin
   LPage := Self;
   with PathObj do
   begin
-    FLineWidth := StrToFloatDef(ANode.GetAttribute('LineWidth'), 0);
+    FLineWidth := StrToFloatDef(ANode.GetAttribute('LineWidth'), 0.353);
     FLineWidthSet := ANode.GetAttribute('LineWidth') <> '';
     FJoinStyle := ANode.GetAttribute('Join');
-    FFill := SameText(ANode.GetAttribute('Fill'), 'true');
+    if ANode.GetAttribute('Fill') = '' then
+      FFill := True
+    else
+      FFill := SameText(ANode.GetAttribute('Fill'), 'true');
     FStroke := ANode.GetAttribute('Stroke') <> 'false';
     FBlendMode := ANode.GetAttribute('BlendMode');
     { GAP-7: Parse Alpha attribute }
@@ -3100,18 +3109,6 @@ begin
           end;
         end;
       end;
-    end;
-
-    { Compat: Some converters render vector text as a PathObject that carries
-      only a StrokeColor (no Fill/Stroke attrs, no FillColor, no LineWidth)
-      but is meant to be a solid glyph. Treat such paths as filled. }
-    if (ANode.GetAttribute('Fill') = '') and (ANode.GetAttribute('Stroke') = '')
-       and (FFillColor = '') and (FStrokeColor <> '') and (FLineWidth = 0) then
-    begin
-      FFill := True;
-      FFillColor := FStrokeColor;
-      FFillColorSet := True;
-      FStroke := False;
     end;
   end;
 

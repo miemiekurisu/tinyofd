@@ -67,9 +67,19 @@ type
 
     { 获取 OFD 外部文件路径 }
     property FileName: String read FFileName;
+
+    { 当前（或最近一次）解包目录，含唯一化后缀；未打开时为空。
+      公开用于测试同一进程内连续打开两个包时目录名互不冲突。 }
+    property ExtractDir: String read FExtractDir;
   end;
 
 implementation
+
+{ Process-wide sequence number making extract dir names unique even when two
+  packages open within the same GetTickCount tick (GetTickCount resolution is
+  ~1ms on some platforms, so PID+tick alone can collide). }
+var
+  ExtractDirSeq: Integer = 0;
 
 { TOFDPackage }
 
@@ -235,7 +245,8 @@ begin
   ExtractRoot := GetExtractRootDir;
   CleanupStaleExtractDirs(ExtractRoot);
   FExtractDir := IncludeTrailingPathDelimiter(ExtractRoot) + 'ofd_extract_' +
-    IntToStr(GetProcessID) + '_' + IntToStr(GetTickCount);
+    IntToStr(GetProcessID) + '_' + IntToStr(GetTickCount) + '_' +
+    IntToStr(InterLockedIncrement(ExtractDirSeq));
   ForceDirectories(FExtractDir);
 
   UnZipper := TUnZipper.Create;
@@ -574,12 +585,15 @@ begin
   end
   else
   begin
-    Result := Encoding.GetString(Bytes, 0, Len);
-    { Free the GBK encoding - GetEncoding creates a new instance each time }
-    if (Encoding <> TEncoding.UTF8) and (Encoding <> TEncoding.ANSI) and
-       (Encoding <> TEncoding.ASCII) and (Encoding <> TEncoding.BigEndianUnicode) and
-       (Encoding <> TEncoding.Unicode) then
-      Encoding.Free;
+    { GetEncoding(936) 每次创建新实例，GetString 抛异常时也要释放 }
+    try
+      Result := Encoding.GetString(Bytes, 0, Len);
+    finally
+      if (Encoding <> TEncoding.UTF8) and (Encoding <> TEncoding.ANSI) and
+         (Encoding <> TEncoding.ASCII) and (Encoding <> TEncoding.BigEndianUnicode) and
+         (Encoding <> TEncoding.Unicode) then
+        Encoding.Free;
+    end;
   end;
 end;
 

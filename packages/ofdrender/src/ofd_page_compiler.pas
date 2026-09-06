@@ -46,7 +46,6 @@ type
     procedure CompileObject(AObj: TObject; ADisplayList: TOFDDisplayList);
     procedure CompileTextObject(ATextObj: TOFDTextObject; ADisplayList: TOFDDisplayList);
     procedure CompilePathObject(APathObj: TOFDPathObject; ADisplayList: TOFDDisplayList);
-    procedure CompileImageObject(AImageObj: TOFDImageObject; ADisplayList: TOFDDisplayList);
     procedure CompileCompositeObject(ACompObj: TOFDCompositeObject; ADisplayList: TOFDDisplayList);
     procedure CompileLayerObject(ALayerObj: TOFDLayerObject; ADisplayList: TOFDDisplayList);
     procedure CompileGroupObject(AGrpObj: TOFDGroupObject; ADisplayList: TOFDDisplayList);
@@ -58,6 +57,10 @@ type
     function CompilePatternCellContent(APathObj: TOFDPathObject): TOFDDisplayList;
     procedure ParsePathData(const AData: String; out ACommands: TOFDPathCommands);
     function ParseFillRule(const AStr: String): TOFDFillRule;
+  public
+    { Pure compile helpers exposed for unit tests (no document access needed
+      for the emitted command): }
+    procedure CompileImageObject(AImageObj: TOFDImageObject; ADisplayList: TOFDDisplayList);
     function ParseColor(const AValue: String): TOFDColor;
   public
     constructor Create(ADocument: TOFDDocument; APageIndex: Integer;
@@ -309,6 +312,7 @@ var
   Path: TOFDPathCommands;
   FillRule: TOFDFillRule;
   Color: TOFDColor;
+  LFillColor: String;
   Alpha: Double;
   PathData: String;
   ObjMatrix: TOFDMatrix;
@@ -410,11 +414,19 @@ begin
         APathObj.AxialShadingSpec.ColorMap, Alpha, FillRule)
     else
     begin
-      Color := ParseColor(APathObj.FillColor);
-      if FHasLayerDrawParam and (APathObj.FillColor = '') and
+      { GB/T 33190 table 35: FillColor defaults to transparent. A Fill=true
+        path without any fill color (neither object nor DrawParam) renders an
+        invisible fill - emit no fill command. StrokeColor-only vector glyph
+        outlines therefore stay hollow. }
+      LFillColor := APathObj.FillColor;
+      if FHasLayerDrawParam and (LFillColor = '') and
          (FCurrentLayerDrawParam.FillColor <> '') then
-        Color := ParseColor(FCurrentLayerDrawParam.FillColor);
-      ADisplayList.AddPath(Path, FillRule, Color, Alpha);
+        LFillColor := FCurrentLayerDrawParam.FillColor;
+      if LFillColor <> '' then
+      begin
+        Color := ParseColor(LFillColor);
+        ADisplayList.AddPath(Path, FillRule, Color, Alpha);
+      end;
     end;
   end;
   if APathObj.Stroke then
@@ -433,11 +445,17 @@ begin
 
   if not APathObj.Fill and not APathObj.Stroke then
   begin
-    Color := ParseColor(APathObj.FillColor);
-    if FHasLayerDrawParam and (APathObj.FillColor = '') and
+    { Both modes explicitly off: draw a fill only when a concrete color is
+      available (legacy writer compat). Per standard this outputs nothing. }
+    LFillColor := APathObj.FillColor;
+    if FHasLayerDrawParam and (LFillColor = '') and
        (FCurrentLayerDrawParam.FillColor <> '') then
-      Color := ParseColor(FCurrentLayerDrawParam.FillColor);
-    ADisplayList.AddPath(Path, FillRule, Color, Alpha);
+      LFillColor := FCurrentLayerDrawParam.FillColor;
+    if LFillColor <> '' then
+    begin
+      Color := ParseColor(LFillColor);
+      ADisplayList.AddPath(Path, FillRule, Color, Alpha);
+    end;
   end;
 
   if HasActiveClip then
@@ -463,11 +481,14 @@ var
   Mat: TOFDMatrix;
   Alpha: Double;
   Res: TOFDResource;
-  Stream: TStream;
   ResourceID: String;
+  BasisXLen, BasisYLen: Double;
 begin
   if not Assigned(AImageObj) then Exit;
   SetLength(ImgData, 0);
+  { A TextObject-less ImageId path may leave Res unassigned below; nil-init so
+    the CacheKey block can never dereference garbage. }
+  Res := nil;
   
   { Get image data from the document }
   ResourceID := AImageObj.ImageId;
@@ -494,39 +515,68 @@ begin
       if FDocument.Package.HasEntry(Res.InternalPath) then
       begin
         try
-          Stream := FDocument.Package.OpenStream(Res.InternalPath);
-          if Assigned(Stream) then
-          begin
-            try
-              Stream.Position := 0;
-              SetLength(ImgData, Stream.Size);
-              Stream.ReadBuffer(ImgData[0], Stream.Size);
-            finally
-              Stream.Free;
-            end;
-          end;
+          { Raw bytes are memoized by internal path in the per-document
+            resource manager: recompiling a page (new width/zoom render) used
+            to re-read the full image payload from the package every time. }
+          ImgData := FDocument.ResourceManager.GetOrLoadRawMediaBytes(
+            Res.InternalPath);
         except
           { Ignore stream open/read errors - image will render empty }
+          SetLength(ImgData, 0);
         end;
       end;
     end;
   end;
   
-  { Build transform matrix from boundary and CTM }
+  { Build transform matrix from boundary and CTM.
+    OFDRW-verified convention (RenderImage in Render.ImageObject.java):
+    Boundary width/height give the destination size in mm, while the object
+    CTM supplies only the orientation (rotation/skew/mirror) of the unit
+    basis vectors - its scale factors must NOT compound with Boundary W/H.
+    Files like containsJPEG.ofd carry CTM = (W 0 0 H 0 0); multiplying W/H
+    into that raw scale renders the image at W*W x H*H mm (a huge block).
+    Keep the raw-CTM placement when a Boundary dimension is absent/zero to
+    preserve the old behaviour for such broken documents. }
   Mat := MatrixIdentity;
-  if AImageObj.CTM[0,0] <> 1.0 then Mat[0,0] := AImageObj.CTM[0,0];
-  if AImageObj.CTM[0,1] <> 0.0 then Mat[0,1] := AImageObj.CTM[0,1];
-  if AImageObj.CTM[1,0] <> 0.0 then Mat[1,0] := AImageObj.CTM[1,0];
-  if AImageObj.CTM[1,1] <> 1.0 then Mat[1,1] := AImageObj.CTM[1,1];
-  if AImageObj.CTM[0,2] <> 0.0 then Mat[0,2] := AImageObj.CTM[0,2];
-  if AImageObj.CTM[1,2] <> 0.0 then Mat[1,2] := AImageObj.CTM[1,2];
-  
-  { Apply boundary offset }
-  Mat[0, 2] := Mat[0, 2] + AImageObj.Left;
-  Mat[1, 2] := Mat[1, 2] + AImageObj.Top;
+  if (AImageObj.Width > 0) and (AImageObj.Height > 0) then
+  begin
+    BasisXLen := Sqrt(Sqr(AImageObj.CTM[0,0]) + Sqr(AImageObj.CTM[0,1]));
+    if BasisXLen > 0 then
+    begin
+      Mat[0,0] := AImageObj.CTM[0,0] / BasisXLen;
+      Mat[0,1] := AImageObj.CTM[0,1] / BasisXLen;
+    end;
+    BasisYLen := Sqrt(Sqr(AImageObj.CTM[1,0]) + Sqr(AImageObj.CTM[1,1]));
+    if BasisYLen > 0 then
+    begin
+      Mat[1,0] := AImageObj.CTM[1,0] / BasisYLen;
+      Mat[1,1] := AImageObj.CTM[1,1] / BasisYLen;
+    end;
+    Mat[0,0] := Mat[0,0] * AImageObj.Width;
+    Mat[0,1] := Mat[0,1] * AImageObj.Width;
+    Mat[1,0] := Mat[1,0] * AImageObj.Height;
+    Mat[1,1] := Mat[1,1] * AImageObj.Height;
+  end
+  else
+  begin
+    if AImageObj.CTM[0,0] <> 1.0 then Mat[0,0] := AImageObj.CTM[0,0];
+    if AImageObj.CTM[0,1] <> 0.0 then Mat[0,1] := AImageObj.CTM[0,1];
+    if AImageObj.CTM[1,0] <> 0.0 then Mat[1,0] := AImageObj.CTM[1,0];
+    if AImageObj.CTM[1,1] <> 1.0 then Mat[1,1] := AImageObj.CTM[1,1];
+  end;
+
+  { Apply CTM translation and boundary offset }
+  Mat[0, 2] := AImageObj.CTM[0, 2] + AImageObj.Left;
+  Mat[1, 2] := AImageObj.CTM[1, 2] + AImageObj.Top;
   
   Alpha := AImageObj.Alpha / 255.0;
-  ADisplayList.AddImage(ImgData, Mat, Alpha);
+  { The resolved internal path is a stable per-doc identity for the image
+    bytes; the render service keys its decoded-image cache on it instead of
+    hashing the payload per image command. }
+  if Assigned(Res) then
+    ADisplayList.AddImage(ImgData, Mat, Alpha, Res.InternalPath)
+  else
+    ADisplayList.AddImage(ImgData, Mat, Alpha);
 end;
 
 procedure TOFDPageCompiler.CompileCompositeObject(ACompObj: TOFDCompositeObject;
@@ -753,7 +803,8 @@ begin
         ADisplayList.AddSetBlendMode(bmMultiply);
         ADisplayList.AddImageRect(ImgData, Mat,
           Stamp.Width, Stamp.Height,
-          Stamp.ClipLeft, Stamp.ClipTop, Stamp.ClipWidth, Stamp.ClipHeight, 1.0);
+          Stamp.ClipLeft, Stamp.ClipTop, Stamp.ClipWidth, Stamp.ClipHeight, 1.0,
+          Stamp.ImagePath);
         ADisplayList.AddSetBlendMode(bmNormal);
       end;
     end
@@ -764,7 +815,7 @@ begin
       else
       begin
         ADisplayList.AddSetBlendMode(bmMultiply);
-        ADisplayList.AddImage(ImgData, Mat, 1.0);
+        ADisplayList.AddImage(ImgData, Mat, 1.0, Stamp.ImagePath);
         ADisplayList.AddSetBlendMode(bmNormal);
       end;
     end;
@@ -1088,20 +1139,27 @@ begin
     end
     else if Parts.Count >= 3 then
     begin
-      { RGB: 3 components, 0-255 range -> normalize to 0-1 }
+      { RGB: 3 components, 0-255 range -> normalize to 0-1.
+        Clamp after normalization: values outside the expected range (e.g. an
+        over-range component or negatives) must not produce a Byte out of
+        range downstream (range-checked builds drop the object). }
       R := StrToFloatDef(Parts[0], 0);
       G := StrToFloatDef(Parts[1], 0);
       B := StrToFloatDef(Parts[2], 0);
       if R > 1 then R := R / 255.0;
       if G > 1 then G := G / 255.0;
       if B > 1 then B := B / 255.0;
+      R := Max(0, Min(1, R));
+      G := Max(0, Min(1, G));
+      B := Max(0, Min(1, B));
       Result := RGBColor(R, G, B);
     end
     else if Parts.Count >= 1 then
     begin
-      { Grayscale: 1 component, 0-255 range -> normalize to 0-1 }
+      { Grayscale: 1 component, 0-255 range -> normalize to 0-1 (clamped). }
       R := StrToFloatDef(Parts[0], 0);
       if R > 1 then R := R / 255.0;
+      R := Max(0, Min(1, R));
       Result := GrayColor(R);
     end;
   finally

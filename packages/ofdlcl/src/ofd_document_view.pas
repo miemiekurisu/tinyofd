@@ -277,6 +277,9 @@ begin
   { Phase 0: Support nil to detach document safely }
   if not Assigned(ADoc) then
   begin
+    { Stop the background worker first: it holds its own ZIP handle open, and
+      a following Open() of the same file would hit a Windows share conflict. }
+    StopBackgroundWorker;
     FPageView.LoadDocument(nil);
     FDocument := nil;
     FCurrentPage := 0;
@@ -371,25 +374,24 @@ begin
     UI thread from blocking on a multi-second page render during scroll. }
   if Assigned(FWorker) and (FViewMode <> vmSinglePage) then
   begin
+    { Worker accessors return owned copies (copied under the worker's lock, so
+      eviction cannot free them mid-copy); they are handed straight to
+      FinalizeBitmap which takes ownership. }
     CachedBmp := FWorker.GetCached(APageIdx, TargetW);
     if Assigned(CachedBmp) then
     begin
-      Bmp := TBitmap.Create;
-      Bmp.Assign(CachedBmp);
-      Result := FinalizeBitmap(Bmp, APageIdx, AW, AH);
+      Result := FinalizeBitmap(CachedBmp, APageIdx, AW, AH);
       Exit;
     end;
     { After a zoom the exact-width bitmap is not ready yet. Reuse any cached
       render of this page (stretched by the caller) as an immediate placeholder
       so the page does not blank to white while the worker re-renders at the
-      new width. The exact width is still requested and will replace it. }
+      new width. The exact width is still requested and will replace it.
+      The placeholder goes through the same rotation finalization as a real
+      render so rotated views never show an unrotated page. }
     CachedBmp := FWorker.GetAnyCached(APageIdx);
     if Assigned(CachedBmp) then
-    begin
-      Bmp := TBitmap.Create;
-      Bmp.Assign(CachedBmp);
-      Result := Bmp;
-    end;
+      Result := FinalizeBitmap(CachedBmp, APageIdx, AW, AH);
     FWorker.Request(APageIdx, TargetW);
     Exit;
   end;
@@ -474,7 +476,7 @@ begin
   W := ABmp.Width;
   H := ABmp.Height;
 
-  { Cache hit: return a copy (caller frees it; cache keeps the master). }
+  { Cache hit: return a copy; the unrotated input is freed here. }
   for I := 0 to FRotCache.Count - 1 do
   begin
     E := TOFDRotatedPage(FRotCache[I]);
@@ -491,6 +493,7 @@ begin
             AH := W;
           end;
       end;
+      ABmp.Free;
       Exit;
     end;
   end;
@@ -517,28 +520,16 @@ begin
           AH := W;
         end;
     end;
+    { Ownership: the input is consumed; free it since we return the copy. }
+    ABmp.Free;
   end;
 end;
 
 procedure TOFDDocumentView.LogRenderError(const AMsg: String);
-{$ifndef RELEASE}
-var
-  F: TextFile;
-  LogPath: String;
-{$endif}
 begin
 {$ifndef RELEASE}
-  try
-    LogPath := ExtractFilePath(Application.ExeName) + 'render_errors.log';
-    AssignFile(F, LogPath);
-    if FileExists(LogPath) then
-      Append(F)
-    else
-      Rewrite(F);
-    WriteLn(F, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now), ' ', AMsg);
-    CloseFile(F);
-  except
-  end;
+  { Shared log helper: serialized across worker + UI threads. }
+  AppendRenderErrorLog('', AMsg);
 {$endif}
 end;
 
@@ -580,6 +571,9 @@ begin
           begin
             PageBmp := GetPageBitmap(I, PageW, PageH);
             PageBmp.Free;
+            { Bitmap missing: fall back to the default page height so the
+              scroll range does not collapse to 0 for this page. }
+            if PageH <= 0 then PageH := 600;
           end;
           Inc(TotalY, PageH);
           if I < FDocument.PageCount - 1 then
@@ -604,6 +598,9 @@ begin
           begin
             PageBmp := GetPageBitmap(I, PageW, PageH);
             PageBmp.Free;
+            { Bitmap missing: fall back to the default page height so the
+              scroll range does not collapse to 0 for this page. }
+            if PageH <= 0 then PageH := 600;
           end;
           if PageH > MaxPageH then
             MaxPageH := PageH;
@@ -886,16 +883,20 @@ begin
         PageBmp := GetPageBitmap(FCurrentPage, PageW, PageH);
         if not Assigned(PageBmp) then Exit;
         try
+          { Panning rules:
+            - Page wider than the viewport: pin to the X scroll offset so the
+              scrollbar pans the page horizontally.
+            - Page narrower: center it, still offset by the scroll position so
+              scrolling after a wider page moves all pages with the content.
+            - Height: align to the scroll position (negative offsets allowed).
+              Clamping to 0 pinned tall pages at the top, freezing vertical
+              scroll in single-page mode. When the page fits vertically the
+              scrollbar range is 0 anyway, so the centered position is used. }
           if PageW >= ClientW then
             DstX := ScrollOffX
           else
-          begin
             DstX := (ClientW - PageW) div 2 + ScrollOffX;
-            if DstX < 0 then DstX := 0;
-          end;
-          { Center vertically when the page fits; otherwise align to scroll top. }
           DstY := ((ClientHeight - HorzScrollBar.Height - PageH) div 2) + ScrollOffY;
-          if DstY < 0 then DstY := 0;
           DstW := PageW;
           DstH := PageH;
           Canvas.StretchDraw(Rect(DstX, DstY, DstX + DstW, DstY + DstH), PageBmp);
@@ -987,6 +988,9 @@ begin
           begin
             PageBmp := GetPageBitmap(I, PageW, PageH);
             PageBmp.Free;
+            { Bitmap missing: fall back to the default page height so the
+              layout does not collapse to 0 for this page. }
+            if PageH <= 0 then PageH := 600;
           end;
           if PageH > MaxPageH then MaxPageH := PageH;
         end;
@@ -1332,7 +1336,7 @@ begin
   TargetW := Min(Round(Entry.Width * FZoom * 96.0 / 25.4), 4096);
   if TargetW <= 0 then Exit;
   { Already rendered by the worker at this width. }
-  if FWorker.GetCached(FCurrentPage, TargetW) <> nil then Exit;
+  if FWorker.IsCached(FCurrentPage, TargetW) then Exit;
   { Render the current page synchronously on the UI thread (the page view's
     page is already loaded) and hand it to the worker cache so the first page
     and explicit page turns appear immediately instead of as a white blank. }

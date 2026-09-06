@@ -5,7 +5,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testutils, testregistry,
-  ofd_document, ofd_resources, ofd_types;
+  ofd_document, ofd_resources, ofd_types, ofd_package;
 
 type
   TTestOFDResourcesExtended = class(TTestCase)
@@ -23,6 +23,11 @@ type
     procedure TestResourceManager_FindFont_AfterParse;
     procedure TestResourceManager_Destroy;
     procedure TestResource_DifferentTypes;
+    procedure TestResolveDrawParam_MultiLevelChain;
+    procedure TestResolveDrawParam_ParentNotPolluted;
+    procedure TestGetOrLoadRawMediaBytes_RealEntry;
+    procedure TestGetOrLoadRawMediaBytes_MissingPath;
+    procedure TestGetOrLoadRawMediaBytes_PathTraversal;
   end;
 
 implementation
@@ -294,6 +299,168 @@ begin
     CheckTrue(R.ResourceType = rdtOther, 'other type');
   finally
     R.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestResolveDrawParam_MultiLevelChain;
+var
+  Doc: TOFDDocument;
+  Mgr: TOFDResourceManager;
+  GP, P1, DP: TOFDDrawParam;
+begin
+  { 祖先链上所有成员只设了一部分属性时，child 必须能继承到
+    仅存在于祖辈的值 }
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(TestFile);
+    Mgr := TOFDResourceManager.Create(Doc);
+    try
+      GP := TOFDDrawParam.Create('gp');
+      GP.LineWidth := 1.25;
+      GP.LineWidthSet := True;
+      Mgr.RegisterDrawParam(GP);
+
+      P1 := TOFDDrawParam.Create('p1');
+      P1.Relative := 'gp';
+      P1.CapSet := True;
+      P1.Cap := lctRound;
+      Mgr.RegisterDrawParam(P1);
+
+      DP := TOFDDrawParam.Create('c1');
+      DP.Relative := 'p1';
+      DP.JoinSet := True;
+      DP.Join := ljtBevel;
+      Mgr.RegisterDrawParam(DP);
+
+      DP := Mgr.ResolveDrawParam('c1');
+      CheckTrue(Assigned(DP), 'resolved');
+      CheckEquals(1.25, DP.LineWidth, 1e-10, 'grandparent LineWidth inherited');
+      CheckEquals(Ord(lctRound), Ord(DP.Cap), 'parent Cap inherited');
+      CheckEquals(Ord(ljtBevel), Ord(DP.Join), 'own Join kept');
+    finally
+      Mgr.Free;
+    end;
+    Doc.Close;
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestResolveDrawParam_ParentNotPolluted;
+var
+  Doc: TOFDDocument;
+  Mgr: TOFDResourceManager;
+  GP, P1, DP: TOFDDrawParam;
+begin
+  { 顺序解析多个兄弟节点时，中间祖先的缓存对象不得被互相污染 }
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(TestFile);
+    Mgr := TOFDResourceManager.Create(Doc);
+    try
+      GP := TOFDDrawParam.Create('ggp');
+      GP.LineWidth := 2.0;
+      GP.LineWidthSet := True;
+      Mgr.RegisterDrawParam(GP);
+
+      P1 := TOFDDrawParam.Create('mid');
+      P1.Relative := 'ggp';
+      Mgr.RegisterDrawParam(P1);
+
+      DP := TOFDDrawParam.Create('leaf1');
+      DP.Relative := 'mid';
+      Mgr.RegisterDrawParam(DP);
+
+      Mgr.ResolveDrawParam('leaf1');
+      { mid 未显式设置 LineWidth，解析 leaf1 后仍不得被填入祖辈值 }
+      CheckFalse(P1.LineWidthSet, 'intermediate stays unset after sibling resolve');
+      CheckEquals(0.353, P1.LineWidth, 1e-10, 'intermediate LineWidth not polluted');
+    finally
+      Mgr.Free;
+    end;
+    Doc.Close;
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestGetOrLoadRawMediaBytes_RealEntry;
+var
+  Doc: TOFDDocument;
+  Mgr: TOFDResourceManager;
+  First, Second: TBytes;
+  EntryName: String;
+begin
+  { Real-entry load + memoized same-size re-read; entry names are case-matched
+    against the package's central directory. }
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(TestFile);
+    Mgr := TOFDResourceManager.Create(Doc);
+    try
+      CheckTrue(Doc.Package.GetEntries.Count > 0, 'package has entries');
+      EntryName := Doc.Package.GetEntries[0];
+      First := Mgr.GetOrLoadRawMediaBytes(EntryName);
+      CheckTrue(Length(First) > 0, 'entry bytes loaded');
+      { Second call must hit the cache and stay byte-identical in size. }
+      Second := Mgr.GetOrLoadRawMediaBytes(EntryName);
+      CheckEquals(Length(First), Length(Second), 'cached re-read same size');
+      CheckTrue(CompareByte(First[0], Second[0], Length(First)) = 0,
+        'cached re-read same content');
+    finally
+      Mgr.Free;
+    end;
+    Doc.Close;
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestGetOrLoadRawMediaBytes_MissingPath;
+var
+  Doc: TOFDDocument;
+  Mgr: TOFDResourceManager;
+  Data: TBytes;
+begin
+  { Missing entries return an empty array (image renders empty), not an
+    exception, matching the previous direct-stream read semantics. }
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(TestFile);
+    Mgr := TOFDResourceManager.Create(Doc);
+    try
+      Data := Mgr.GetOrLoadRawMediaBytes('no/such/entry.bin');
+      CheckEquals(0, Length(Data), 'missing entry: empty bytes');
+    finally
+      Mgr.Free;
+    end;
+    Doc.Close;
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestGetOrLoadRawMediaBytes_PathTraversal;
+var
+  Doc: TOFDDocument;
+  Mgr: TOFDResourceManager;
+  Data: TBytes;
+begin
+  { Path traversal must be neutralized like HasEntry does: caught by the
+    method (empty result), never escaping to the caller. }
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(TestFile);
+    Mgr := TOFDResourceManager.Create(Doc);
+    try
+      Data := Mgr.GetOrLoadRawMediaBytes('../outside.png');
+      CheckEquals(0, Length(Data), 'traversal path: empty bytes');
+    finally
+      Mgr.Free;
+    end;
+    Doc.Close;
+  finally
+    Doc.Free;
   end;
 end;
 

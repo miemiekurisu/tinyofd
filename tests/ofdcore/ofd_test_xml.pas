@@ -44,6 +44,9 @@ type
     procedure TestParseOFDHeader;
     procedure TestParseDocumentXML;
     procedure TestParseMismatchedTags;
+    procedure TestParseMixedContent;
+    procedure TestParseSecondTopLevelElement;
+    procedure TestParseDoubleCommaSeparator;
   end;
 implementation
 procedure TTestOFDXMLNode.TestCreate;
@@ -480,6 +483,48 @@ begin
   except
     on E: EOFDXmlError do CheckTrue(True, 'raised EOFDXmlError for mismatched tags');
   end;
+  P.Free;
+end;
+procedure TTestOFDXMLNode.TestParseMixedContent;
+var
+  P: TOFDXMLParser;
+  Root, B: TOFDXMLNode;
+begin
+  { 子元素开启前父节点累积的文本必须保留 }
+  P := TOFDXMLParser.Create;
+  P.LoadFromString('<doc>hello <b>world</b> tail</doc>');
+  Root := P.GetRoot;
+  CheckTrue(Copy(Root.TextContent, 1, 5) = 'hello', 'parent text before child kept');
+  CheckTrue(Pos('tail', Root.TextContent) > 0, 'parent text after child kept');
+  B := Root.FindChild('b');
+  CheckTrue(B <> nil, 'child found');
+  CheckEquals('world', B.TextContent, 'child text');
+  P.Free;
+end;
+procedure TTestOFDXMLNode.TestParseSecondTopLevelElement;
+var
+  P: TOFDXMLParser;
+  Root: TOFDXMLNode;
+begin
+  { 第二个顶层元素必须被安全丢弃，不得泄漏或破坏第一棵树 }
+  P := TOFDXMLParser.Create;
+  P.LoadFromString('<first>1</first><second>2</second>');
+  Root := P.GetRoot;
+  CheckEquals('first', Root.TagName, 'first root kept');
+  CheckEquals('1', Root.TextContent, 'first root text');
+  CheckEquals(0, Root.Children.Count, 'second top-level element not attached');
+  P.Free;
+end;
+procedure TTestOFDXMLNode.TestParseDoubleCommaSeparator;
+var
+  P: TOFDXMLParser;
+begin
+  { 小数点解析必须与系统 locale 无关 }
+  P := TOFDXMLParser.Create;
+  CheckEquals(85.4, P.ParseDouble('85.4', 0), 1e-10, 'dot decimal explicit');
+  CheckEquals(85.4, P.ParseDouble('85,4', 0), 1e-10, 'comma accepted and normalized');
+  CheckEquals(85.42, P.ParseDouble('85.42', 0), 1e-10, 'dot decimal two fractions');
+  CheckEquals(85.42, P.ParseDouble('85,42', 0), 1e-10, 'comma decimal two fractions');
   P.Free;
 end;
 initialization

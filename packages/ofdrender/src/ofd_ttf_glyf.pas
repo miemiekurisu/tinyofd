@@ -841,10 +841,14 @@ begin
   if SegCountX2 = 0 then Exit;
   SegCount := SegCountX2 div 2;
 
-  EndCodes := CmapSubTable + 8;
-  StartCodes := EndCodes + SegCount + 2;
-  IdDelta := StartCodes + SegCount + 2;
-  IdRangeOffset := IdDelta + SegCount + 2;
+  { cmap format 4 subtable layout (spec):
+      0  format (2)   2  length (2)   4  language (2)   6  segCountX2 (2)
+      8  searchRange  10 entrySelector 12 rangeShift | 14 endCodes[segCount]
+      startCodes, idDeltas, idRangeOffsets follow, each segCount*2 bytes. }
+  EndCodes := CmapSubTable + 14;
+  StartCodes := EndCodes + SegCountX2;
+  IdDelta := StartCodes + SegCountX2;
+  IdRangeOffset := IdDelta + SegCountX2;
 
   for I := 0 to SegCount - 1 do
   begin

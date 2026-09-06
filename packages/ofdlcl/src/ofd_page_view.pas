@@ -26,7 +26,7 @@ unit ofd_page_view;
 interface
 
 uses
-  Classes, SysUtils, Math, Controls, Graphics, Types, StdCtrls, Forms, LCLType, LazLogger,
+  Classes, SysUtils, Math, Controls, Graphics, Types, StdCtrls, ExtCtrls, Forms, LCLType, LazLogger,
   ofd_types, ofd_page, ofd_document, ofd_resources,
   ofd_page_compiler, ofd_display_list, ofd_render_service, ofd_surface,
   ofd_surface_presenter, ofd_render_diagnostics, ofd_render_outcome,
@@ -98,6 +98,12 @@ type
     // Page cache
     FPageCache: TList;
     FMaxCachePages: Integer;
+    { D4: Ctrl+wheel zoom debounce. While a zoom gesture is in progress the
+      paint path keeps stretching the PREVIOUS zoom's bitmap (no re-parse,
+      no re-render); ~cZoomDebounceMs after the last notch the full re-render
+      is committed. }
+    FZoomDebounce: TTimer;
+    FZoomPending: Boolean;
     { Phase 0: Render control flags }
     FRenderControl: TOFDRenderControl;
   protected
@@ -117,6 +123,12 @@ type
       MousePos: TPoint): Boolean; override;
     procedure EnsureInitialized;
     procedure InvalidateCache;
+    { D3: cache entry (not a copy) lookup — DoPaint reads the owned bitmap
+      directly. Also returns the rotated-bitmap slot creator. }
+    function GetCachedPageEntry(APageIndex: Integer; AZoom: Double): TObject;
+    { D4: cancel a pending zoom debounce (page/document/rotation change). }
+    procedure CancelZoomDebounce;
+    procedure ZoomDebounceTimer(Sender: TObject);
     procedure SBVertChange(Sender: TObject);
     procedure SBHorzChange(Sender: TObject);
     procedure LoadEmbeddedFonts;
@@ -184,7 +196,7 @@ procedure Register;
 implementation
 
 uses
-  Contnrs;
+  Contnrs, ofd_render_worker;
 
 function OFDGetWheelScrollLines: Integer;
 var
@@ -205,6 +217,12 @@ type
     FPageIndex: Integer;
     FZoom: Double;
     FBitmap: TBitmap;
+    { Lazily-rotated copy of FBitmap (D5): rebuilt whenever FRotatedAngle does
+      not match the view's current rotation. Created on demand in DoPaint;
+      stale rotated copies are freed before re-rotation, so no unbounded
+      growth. Invalidated wholesale by InvalidateCache. }
+    FRotatedBitmap: TBitmap;
+    FRotatedAngle: Integer;
     FLastAccess: TDateTime;
   public
     constructor Create;
@@ -212,6 +230,8 @@ type
     property PageIndex: Integer read FPageIndex write FPageIndex;
     property Zoom: Double read FZoom write FZoom;
     property Bitmap: TBitmap read FBitmap write FBitmap;
+    property RotatedBitmap: TBitmap read FRotatedBitmap write FRotatedBitmap;
+    property RotatedAngle: Integer read FRotatedAngle write FRotatedAngle;
     property LastAccess: TDateTime read FLastAccess write FLastAccess;
   end;
 
@@ -220,16 +240,28 @@ const
   SCROLL_BAR_W = 16;
   DEFAULT_CACHE_PAGES = 5;
   MAX_RENDER_DIM = 16384;
+  { D4: commit delay after the last Ctrl+wheel notch before the full re-render
+    runs (SumatraPDF-style transient zoom while animating). }
+  cZoomDebounceMs = 120;
+  { Byte budget for the parsed-page bitmap cache (32bpp RGBA estimated).
+    Entries are keyed by the CLAMPED render zoom, but at extreme zoom a single
+    surface can still reach MAX_RENDER_DIM^2 * 4 (~1 GiB); the count limit
+    (FMaxCachePages) alone is not enough, so entries are additionally evicted
+    LRU-oldest-first until the stored bytes fit this budget. }
+  MAX_PAGE_CACHE_BYTES = 192 * 1024 * 1024;
 
 constructor TOFDPageCacheEntry.Create;
 begin
   inherited Create;
   FBitmap := TBitmap.Create;
+  FRotatedBitmap := nil;
+  FRotatedAngle := -1;
   FLastAccess := Now;
 end;
 
 destructor TOFDPageCacheEntry.Destroy;
 begin
+  FRotatedBitmap.Free;
   FBitmap.Free;
   inherited Destroy;
 end;
@@ -268,6 +300,11 @@ begin
   FPageCache := TList.Create;
   FMaxCachePages := DEFAULT_CACHE_PAGES;
   FRotationAngle := 0;
+  FZoomPending := False;
+  FZoomDebounce := TTimer.Create(Self);
+  FZoomDebounce.Enabled := False;
+  FZoomDebounce.Interval := cZoomDebounceMs;
+  FZoomDebounce.OnTimer := ZoomDebounceTimer;
   FillChar(FRenderControl, SizeOf(FRenderControl), 0);
 
   VertScrollBar := TScrollBar.Create(Self);
@@ -379,7 +416,8 @@ begin
   FNeedRedraw := True;
 end;
 
-function TOFDPageView.GetCachedBitmap(APageIndex: Integer; AZoom: Double): TBitmap;
+function TOFDPageView.GetCachedPageEntry(APageIndex: Integer;
+  AZoom: Double): TObject;
 var
   I: Integer;
   CacheEntry: TOFDPageCacheEntry;
@@ -394,10 +432,36 @@ begin
        (Abs(CacheEntry.Zoom - AZoom) < Epsilon) then
     begin
       CacheEntry.LastAccess := Now;
-      Result := CacheEntry.Bitmap;
+      Result := CacheEntry;
       Exit;
     end;
   end;
+end;
+
+procedure TOFDPageView.CancelZoomDebounce;
+begin
+  FZoomPending := False;
+  FZoomDebounce.Enabled := False;
+end;
+
+procedure TOFDPageView.ZoomDebounceTimer(Sender: TObject);
+begin
+  { Last zoom notch is older than cZoomDebounceMs: commit the deferred
+    full re-render (clear cache -> Paint re-renders at the new zoom). }
+  CancelZoomDebounce;
+  InvalidateCache;
+  Invalidate;
+end;
+
+function TOFDPageView.GetCachedBitmap(APageIndex: Integer; AZoom: Double): TBitmap;
+var
+  CacheEntry: TOFDPageCacheEntry;
+begin
+  CacheEntry := TOFDPageCacheEntry(GetCachedPageEntry(APageIndex, AZoom));
+  if Assigned(CacheEntry) then
+    Result := CacheEntry.Bitmap
+  else
+    Result := nil;
 end;
 
 procedure TOFDPageView.PutCacheBitmap(APageIndex: Integer; AZoom: Double; ABitmap: TBitmap);
@@ -406,6 +470,7 @@ var
   CacheEntry: TOFDPageCacheEntry;
   OldestIdx: Integer;
   OldestTime: TDateTime;
+  NewBytes, TotalBytes: Int64;
 begin
   if not Assigned(ABitmap) then Exit;
   { Check if already cached }
@@ -420,9 +485,25 @@ begin
       Exit;
     end;
   end;
-  { Phase 7: Evict LRU entries if full }
-  while FPageCache.Count >= FMaxCachePages do
+  NewBytes := OFDBitmapBytes(ABitmap.Width, ABitmap.Height);
+  { A single entry larger than the whole cache budget would evict everything
+    and still blow the limit; do not cache it (it is re-rendered on demand). }
+  if NewBytes >= MAX_PAGE_CACHE_BYTES then Exit;
+  { Phase 7: Evict LRU entries when over the page-count or byte budget. Guard
+    for Count > 0: with FMaxCachePages <= 0 the old loop read FPageCache[0] on
+    an empty list. }
+  while FPageCache.Count > 0 do
   begin
+    if (FPageCache.Count < FMaxCachePages) then
+    begin
+      TotalBytes := 0;
+      for I := 0 to FPageCache.Count - 1 do
+        TotalBytes := TotalBytes + OFDBitmapBytes(
+          TOFDPageCacheEntry(FPageCache[I]).Bitmap.Width,
+          TOFDPageCacheEntry(FPageCache[I]).Bitmap.Height);
+      if TotalBytes + NewBytes <= MAX_PAGE_CACHE_BYTES then
+        Break;
+    end;
     OldestIdx := 0;
     OldestTime := TOFDPageCacheEntry(FPageCache[0]).LastAccess;
     for I := 1 to FPageCache.Count - 1 do
@@ -678,7 +759,13 @@ begin
     { Ctrl+Wheel: multiplicative zoom, matching the toolbar factor (FZoomFactor,
       default 1.2). Multiplicative keeps the relative change constant at every
       zoom level so a notch always visibly zooms (a fixed additive step is
-      imperceptible at high zoom). Mirrors SumatraPDF's relative zoom. }
+      imperceptible at high zoom). Mirrors SumatraPDF's relative zoom.
+      D4: each notch used to wipe the page cache and force a full synchronous
+      re-render in the next paint (~1-2s per notch on complex pages). The zoom
+      is applied to the layout immediately (scrollbars/UpdateRanges/Invalidate
+      here), while the expensive re-render is deferred: while FZoomPending the
+      paint path keeps stretching the previous zoom's bitmap, and the debounce
+      timer commits the re-render cZoomDebounceMs after the last notch. }
     if WheelDelta > 0 then
       NewZoom := FZoom * FZoomFactor
     else
@@ -689,7 +776,8 @@ begin
 
     FZoom := NewZoom;
     FZoomMode := zmCustom;
-    InvalidateCache;
+    FZoomPending := True;
+    FZoomDebounce.Enabled := True;
     UpdateScrollBarRanges;
     Invalidate;
     if Assigned(FOnZoomChange) then
@@ -765,7 +853,9 @@ var
   RenderZoom: Double;
   DrawX, DrawY: Integer;
   DstRect: TRect;
-  CachedBmp: TBitmap;
+  SrcBitmap: TBitmap;
+  CacheEntry: TOFDPageCacheEntry;
+  DestRot: TBitmap;
   Rotated: TBitmap;
   Compiler: TOFDPageCompiler;
   DisplayList: TOFDDisplayList;
@@ -789,119 +879,154 @@ begin
   if FPageHeightPx <= 0 then FPageHeightPx := 1;
 
   { P0-6 FIX: Render at target zoom DPI, not 96 DPI then stretch }
-  RenderW := Round(FPageWidthPx * FZoom);
-  RenderH := Round(FPageHeightPx * FZoom);
+  { Clamp effective zoom so the rendered surface stays within the offscreen
+    size cap; extreme zoom would otherwise try to allocate a multi-GB surface
+    and OOM. The clamped value is also the cache key, so cache entries can
+    never describe a surface larger than MAX_RENDER_DIM^2. }
+  RenderZoom := OFDComputeRenderZoom(FPageWidthPx, FPageHeightPx, FZoom, MAX_RENDER_DIM);
+  RenderW := Round(FPageWidthPx * RenderZoom);
+  RenderH := Round(FPageHeightPx * RenderZoom);
   if RenderW <= 0 then RenderW := 1;
   if RenderH <= 0 then RenderH := 1;
 
-if (FOffscreenBitmap.Width <> RenderW) or
-      (FOffscreenBitmap.Height <> RenderH) then
-  begin
-    { Phase 7: Guard against excessively large surfaces }
-    if (RenderW > 16384) or (RenderH > 16384) then
-    begin
-      FOffscreenBitmap.Width := Min(RenderW, 16384);
-      FOffscreenBitmap.Height := Min(RenderH, 16384);
-    end
-    else
-    begin
-      FOffscreenBitmap.Width := RenderW;
-      FOffscreenBitmap.Height := RenderH;
-    end;
-    FNeedRedraw := True;
-  end;
+  SrcBitmap := FOffscreenBitmap;
 
-  // 从缓存中获取已渲染的页面
-  if Assigned(FPageCache) then
+  { D4: while a Ctrl+wheel zoom gesture is pending, skip any re-render work
+    (resize + cache lookup + full page render): the previous zoom's offscreen
+    bitmap is drawn stretched to the new layout, and ZoomDebounceTimer commits
+    the real re-render cZoomDebounceMs after the last notch. }
+  if not FZoomPending then
   begin
-    CachedBmp := GetCachedBitmap(FPageIndex, FZoom);
-    if Assigned(CachedBmp) then
+    if (FOffscreenBitmap.Width <> RenderW) or
+        (FOffscreenBitmap.Height <> RenderH) then
     begin
-      FOffscreenBitmap.Assign(CachedBmp);
-      FNeedRedraw := False;
-    end;
-  end;
-
-  // 全页渲染 (只在需要时执行)
-  if FNeedRedraw then
-  begin
-    FOffscreenBitmap.Canvas.Brush.Color := clWhite;
-    FOffscreenBitmap.Canvas.FillRect(0, 0, RenderW, RenderH);
-
-    { Software renderer (Next) - single pipeline }
-    if Assigned(FRenderService) and Assigned(FPage) then
-    begin
-      LOutcome := nil;
-      try
-        Compiler := TOFDPageCompiler.Create(FDocument, FPageIndex, GlobalDiagLogger);
-        try
-          DisplayList := Compiler.Compile(FPage);
-          try
-            { Clamp effective zoom so the rendered surface stays within the
-              offscreen size cap; extreme zoom would otherwise try to allocate
-              a multi-GB surface and OOM. }
-            RenderZoom := FZoom;
-            if (FPageWidthPx > 0) and (FPageWidthPx * RenderZoom > MAX_RENDER_DIM) then
-              RenderZoom := MAX_RENDER_DIM / FPageWidthPx;
-            if (FPageHeightPx > 0) and (FPageHeightPx * RenderZoom > MAX_RENDER_DIM) then
-              RenderZoom := MAX_RENDER_DIM / FPageHeightPx;
-            LOutcome := FRenderService.RenderDisplayListWithOutcome(DisplayList,
-              FPage.Width, FPage.Height, 96.0, RenderZoom);
-            Surface := TOFDSurface(LOutcome.Surface);
-            if Assigned(Surface) then
-            begin
-              try
-                RenderedBmp := TOFDSurfacePresenter.SurfaceToBitmap(Surface);
-                try
-                  FOffscreenBitmap.Assign(RenderedBmp);
-                finally
-                  RenderedBmp.Free;
-                end;
-              finally
-                { Surface ownership transfers out of the outcome to the caller. }
-                Surface.Free;
-              end;
-            end;
-          finally
-            DisplayList.Free;
-          end;
-        finally
-          Compiler.Free;
-        end;
-      except
-        on E: Exception do
-        begin
-          { Phase 7: Render error — draw error indicator, don't crash Paint }
-          FOffscreenBitmap.Canvas.Brush.Color := clWhite;
-          FOffscreenBitmap.Canvas.FillRect(0, 0, RenderW, RenderH);
-          FOffscreenBitmap.Canvas.Font.Color := clRed;
-          FOffscreenBitmap.Canvas.TextOut(4, 4, 'Render error: ' + E.Message);
-        end;
-      end;
-      { P0 FIX: Only cache when rendering actually succeeded. A page that only
-        rasterized a few glyphs (rsDegraded/rsFailed) must NOT be cached as a
-        successful render unless the operator explicitly opts into caching
-        degraded pages. }
-      if Assigned(LOutcome) and (LOutcome.Status = rsSuccess) then
+      { Phase 7: Guard against excessively large surfaces }
+      if (RenderW > 16384) or (RenderH > 16384) then
       begin
-        FNeedRedraw := False;
-        if Assigned(FPageCache) then
-          PutCacheBitmap(FPageIndex, FZoom, FOffscreenBitmap);
-      end
-      else if Assigned(LOutcome) and FRenderControl.CacheDegradedPages and
-              (LOutcome.Status in [rsDegraded, rsFailed]) then
-      begin
-        FNeedRedraw := False;
-        if Assigned(FPageCache) then
-          PutCacheBitmap(FPageIndex, FZoom, FOffscreenBitmap);
+        FOffscreenBitmap.Width := Min(RenderW, 16384);
+        FOffscreenBitmap.Height := Min(RenderH, 16384);
       end
       else
       begin
-        { Degraded/failed and not allowed to cache: force re-render next paint. }
-        FNeedRedraw := True;
+        FOffscreenBitmap.Width := RenderW;
+        FOffscreenBitmap.Height := RenderH;
       end;
-      if Assigned(LOutcome) then
-        LOutcome.Free;
+      FNeedRedraw := True;
+    end;
+
+    // 从缓存中获取已渲染的页面
+    CacheEntry := TOFDPageCacheEntry(GetCachedPageEntry(FPageIndex, RenderZoom));
+    if Assigned(CacheEntry) then
+    begin
+      { D3: draw the cache-owned bitmap directly. The page cache is touched
+        only from the UI thread (Paint / PutCacheBitmap / InvalidateCache),
+        so no eviction can free the bitmap mid-paint. This drops the per-paint
+        whole-page Assign copy. }
+      if FRotationAngle = 0 then
+        SrcBitmap := CacheEntry.Bitmap
+      else
+      begin
+        { D5: cache the rotated copy alongside the entry and rebuild it only
+          when the angle changed; previously every repaint re-rotated the
+          whole page. Angle changes are rare, and a stale rotated copy just
+          triggers one rebuild (freed before re-rotation). }
+        if (CacheEntry.RotatedAngle <> FRotationAngle) or
+           not Assigned(CacheEntry.RotatedBitmap) then
+        begin
+          DestRot := nil;
+          case FRotationAngle of
+            90: RotateBitmap90(CacheEntry.Bitmap, DestRot);
+            180: RotateBitmap180(CacheEntry.Bitmap, DestRot);
+            270: RotateBitmap270(CacheEntry.Bitmap, DestRot);
+          end;
+          CacheEntry.RotatedBitmap.Free;
+          CacheEntry.RotatedBitmap := DestRot;
+          CacheEntry.RotatedAngle := FRotationAngle;
+        end;
+        SrcBitmap := CacheEntry.RotatedBitmap;
+      end;
+      FNeedRedraw := False;
+    end;
+
+    // 全页渲染 (只在需要时执行)
+    if FNeedRedraw then
+    begin
+      { (Fresh offscreen render below - the source for drawing is the
+        offscreen bitmap, which is what SrcBitmap was initialized to.) }
+      FOffscreenBitmap.Canvas.Brush.Color := clWhite;
+      FOffscreenBitmap.Canvas.FillRect(0, 0, RenderW, RenderH);
+
+      { Software renderer (Next) - single pipeline }
+      if Assigned(FRenderService) and Assigned(FPage) then
+      begin
+        LOutcome := nil;
+        try
+          Compiler := TOFDPageCompiler.Create(FDocument, FPageIndex, GlobalDiagLogger);
+          try
+            DisplayList := Compiler.Compile(FPage);
+            try
+              { RenderZoom is precomputed above (clamped, cache-key consistent). }
+              LOutcome := FRenderService.RenderDisplayListWithOutcome(DisplayList,
+                FPage.Width, FPage.Height, 96.0, RenderZoom);
+              Surface := TOFDSurface(LOutcome.Surface);
+              if Assigned(Surface) then
+              begin
+                try
+                  RenderedBmp := TOFDSurfacePresenter.SurfaceToBitmap(Surface);
+                  try
+                    FOffscreenBitmap.Assign(RenderedBmp);
+                  finally
+                    RenderedBmp.Free;
+                  end;
+                finally
+                  { Surface ownership transfers out of the outcome to the caller. }
+                  Surface.Free;
+                end;
+              end;
+            finally
+              DisplayList.Free;
+            end;
+          finally
+            Compiler.Free;
+          end;
+        except
+          on E: Exception do
+          begin
+            { Phase 7: Render error — draw error indicator, don't crash Paint }
+            FOffscreenBitmap.Canvas.Brush.Color := clWhite;
+            FOffscreenBitmap.Canvas.FillRect(0, 0, RenderW, RenderH);
+            FOffscreenBitmap.Canvas.Font.Color := clRed;
+            FOffscreenBitmap.Canvas.TextOut(4, 4, 'Render error: ' + E.Message);
+          end;
+        end;
+        { P0 FIX: Only cache when rendering actually succeeded. A page that only
+          rasterized a few glyphs (rsDegraded/rsFailed) must NOT be cached as a
+          successful render unless the operator explicitly opts into caching
+          degraded pages. }
+        if Assigned(LOutcome) and (LOutcome.Status = rsSuccess) then
+        begin
+          FNeedRedraw := False;
+        end
+        else if Assigned(LOutcome) and FRenderControl.CacheDegradedPages and
+                (LOutcome.Status in [rsDegraded, rsFailed]) then
+        begin
+          FNeedRedraw := False;
+        end
+        else
+        begin
+          { Degraded/failed and not allowed to cache: force re-render next paint. }
+          FNeedRedraw := True;
+        end;
+        { The cache gets the post-render offscreen copy only for allowed
+          statuses; PutCacheBitmap ignores nil/blocked statuses itself. }
+        if Assigned(LOutcome) and (LOutcome.Status = rsSuccess) then
+          PutCacheBitmap(FPageIndex, RenderZoom, FOffscreenBitmap)
+        else if Assigned(LOutcome) and FRenderControl.CacheDegradedPages and
+                (LOutcome.Status in [rsDegraded, rsFailed]) then
+          PutCacheBitmap(FPageIndex, RenderZoom, FOffscreenBitmap);
+        if Assigned(LOutcome) then
+          LOutcome.Free;
+      end;
     end;
   end;
 
@@ -922,25 +1047,33 @@ if (FOffscreenBitmap.Width <> RenderW) or
   if (DstRect.Right > ClientRect.Left) and (DstRect.Bottom > ClientRect.Top) and
      (DstRect.Left < ClientRect.Right) and (DstRect.Top < ClientRect.Bottom) then
   begin
-    if FRotationAngle <> 0 then
-    begin
-      Rotated := nil;
-      try
-        case FRotationAngle of
-          90: RotateBitmap90(FOffscreenBitmap, Rotated);
-          180: RotateBitmap180(FOffscreenBitmap, Rotated);
-          270: RotateBitmap270(FOffscreenBitmap, Rotated);
-        end;
-        if Assigned(Rotated) then
-          C.StretchDraw(DstRect, Rotated)
+    Rotated := nil;
+    try
+      if SrcBitmap = FOffscreenBitmap then
+      begin
+        { Drawing from the offscreen bitmap (fresh render or pending zoom):
+          rotation must go through a temporary (unchanged behaviour); the
+          cached-entry path already prepared a cached rotated copy above. }
+        if FRotationAngle <> 0 then
+        begin
+          case FRotationAngle of
+            90: RotateBitmap90(FOffscreenBitmap, Rotated);
+            180: RotateBitmap180(FOffscreenBitmap, Rotated);
+            270: RotateBitmap270(FOffscreenBitmap, Rotated);
+          end;
+          if Assigned(Rotated) then
+            C.StretchDraw(DstRect, Rotated)
+          else
+            C.StretchDraw(DstRect, FOffscreenBitmap);
+        end
         else
           C.StretchDraw(DstRect, FOffscreenBitmap);
-      finally
-        Rotated.Free;
-      end;
-    end
-    else
-      C.StretchDraw(DstRect, FOffscreenBitmap);
+      end
+      else
+        C.StretchDraw(DstRect, SrcBitmap);
+    finally
+      Rotated.Free;
+    end;
   end;
 end;
 
@@ -1063,6 +1196,7 @@ begin
   { Phase 0: Support nil to detach document safely }
   if not Assigned(ADoc) then
   begin
+      CancelZoomDebounce;
       UnloadFonts;
       if Assigned(FPage) then FreeAndNil(FPage);
       if Assigned(FRenderService) then FreeAndNil(FRenderService);
@@ -1114,6 +1248,9 @@ procedure TOFDPageView.ReloadPage;
 var
   NewPage: TOFDPage;
 begin
+  { A page switch must not keep a zoom-debounce pending: the pending state
+    would suppress re-rendering the NEW page (stale previous-page bitmap). }
+  CancelZoomDebounce;
   if not FInitialized then
     EnsureInitialized;
 
@@ -1340,25 +1477,11 @@ begin
 end;
 
 procedure TOFDPageView.LogRenderError(const AMsg: String);
-{$ifndef RELEASE}
-var
-  F: TextFile;
-  LogPath: String;
-{$endif}
 begin
 {$ifndef RELEASE}
-  try
-    LogPath := ExtractFilePath(Application.ExeName) + 'render_errors.log';
-    AssignFile(F, LogPath);
-    if FileExists(LogPath) then
-      Append(F)
-    else
-      Rewrite(F);
-    WriteLn(F, FormatDateTime('yyyy-mm-dd hh:nn:ss', Now), ' ', AMsg);
-    CloseFile(F);
-  except
-    { Never let logging itself raise into the render path. }
-  end;
+  { Shared log helper (ofd_render_worker): serialized across worker + UI
+    threads, same path/format as before. }
+  AppendRenderErrorLog('', AMsg);
 {$endif}
 end;
 
@@ -1371,6 +1494,7 @@ begin
   Normalized := (AValue mod 360 + 360) mod 360;
   if (Normalized mod 90 <> 0) or (FRotationAngle = Normalized) then Exit;
   FRotationAngle := Normalized;
+  CancelZoomDebounce;
   InvalidateCache;
   FNeedRedraw := True;
   Invalidate;

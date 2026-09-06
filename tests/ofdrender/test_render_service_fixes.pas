@@ -6,7 +6,7 @@ interface
 uses
   Classes, SysUtils, Math, fpcunit, testutils, testregistry,
   ofd_types, ofd_canvas_intf, ofd_surface, ofd_compositor, ofd_display_list, ofd_ttf_glyf,
-  ofd_render_service;
+  ofd_font_engine_intf, ofd_ft2_engine, ofd_render_service;
 
 type
   TTestRenderServiceFixes = class(TTestCase)
@@ -55,6 +55,13 @@ type
     procedure TestStrokePath_SingleSegment;
     procedure TestStrokePath_ClosePath;
     procedure TestStrokePath_QuadraticApproximation;
+
+    { Regression: pattern fill must composite through the clip mask without
+      wiping previously drawn content. }
+    procedure TestPatternFill_MaskDoesNotWipePage;
+
+    { Regression: broken font data must resolve to nil, not a blank face. }
+    procedure TestFT2Engine_BadFontReturnsNil;
   end;
 
 implementation
@@ -1275,6 +1282,119 @@ begin
       Format('Quadratic stroke should produce visible pixels, got %d', [NonWhitePixels]));
   finally
     S.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestPatternFill_MaskDoesNotWipePage;
+var
+  Service: TOFDRenderService;
+  DL, CellContent: TOFDDisplayList;
+  Surface: TOFDSurface;
+  B, G, R, A: Byte;
+  M: TOFDMatrix;
+  BgPath, RegionPath, CellPath: TOFDPathCommands;
+  Pattern: TOFDPatternSpec;
+begin
+  { Regression: RenderPatternFill used to draw the pattern tiles onto the MAIN
+    surface and then apply the fill-path clip mask to that same surface,
+    zeroing alpha outside the pattern region and wiping everything drawn
+    earlier (e.g. the page background). The tiles must render to a temp
+    surface composited through the mask, like ctPushClip. }
+  Service := TOFDRenderService.Create;
+  try
+    Service.Diagnostics := False;
+
+    { NOTE: AddPatternFillWithContent transfers ownership of CellContent to the
+      command (freed with the display list) - only DL itself must be freed here. }
+    CellContent := TOFDDisplayList.Create;
+    SetLength(CellPath, 5);
+    CellPath[0].Cmd := pcMoveTo; CellPath[0].X := 0; CellPath[0].Y := 0;
+    CellPath[1].Cmd := pcLineTo; CellPath[1].X := 1; CellPath[1].Y := 0;
+    CellPath[2].Cmd := pcLineTo; CellPath[2].X := 1; CellPath[2].Y := 1;
+    CellPath[3].Cmd := pcLineTo; CellPath[3].X := 0; CellPath[3].Y := 1;
+    CellPath[4].Cmd := pcClosePath;
+    CellContent.AddPath(CellPath, frNonZero, RGBColor(0, 150, 0), 1.0);
+
+    DL := TOFDDisplayList.Create;
+    try
+      FillChar(M, SizeOf(M), 0);
+      M[0,0] := 1; M[1,1] := 1; M[2,2] := 1;
+      DL.AddTransform(M);
+
+      { Opaque red background over the whole 20x20mm page. }
+      SetLength(BgPath, 5);
+      BgPath[0].Cmd := pcMoveTo; BgPath[0].X := 0; BgPath[0].Y := 0;
+      BgPath[1].Cmd := pcLineTo; BgPath[1].X := 20; BgPath[1].Y := 0;
+      BgPath[2].Cmd := pcLineTo; BgPath[2].X := 20; BgPath[2].Y := 20;
+      BgPath[3].Cmd := pcLineTo; BgPath[3].X := 0; BgPath[3].Y := 20;
+      BgPath[4].Cmd := pcClosePath;
+      DL.AddPath(BgPath, frNonZero, RGBColor(200, 0, 0), 1.0);
+
+      { Pattern fill limited to a sub-rect (5,5)-(10,10)mm. }
+      SetLength(RegionPath, 5);
+      RegionPath[0].Cmd := pcMoveTo; RegionPath[0].X := 5; RegionPath[0].Y := 5;
+      RegionPath[1].Cmd := pcLineTo; RegionPath[1].X := 10; RegionPath[1].Y := 5;
+      RegionPath[2].Cmd := pcLineTo; RegionPath[2].X := 10; RegionPath[2].Y := 10;
+      RegionPath[3].Cmd := pcLineTo; RegionPath[3].X := 5; RegionPath[3].Y := 10;
+      RegionPath[4].Cmd := pcClosePath;
+      FillChar(Pattern, SizeOf(Pattern), 0);
+      Pattern.CellTransform := MatrixIdentity;
+      Pattern.XStep := 2;
+      Pattern.YStep := 2;
+      Pattern.CellWidth := 1.5;
+      Pattern.CellHeight := 1.5;
+      DL.AddPatternFillWithContent(RegionPath, Pattern, CellContent, 1.0, frNonZero);
+
+      Surface := nil;
+    finally
+      Surface := Service.RenderDisplayList(DL, 20, 20, 96, 1);
+      DL.Free;
+    end;
+
+    try
+      { Outside the pattern region but ON the page: background must stay
+        opaque red. Before the fix the mask wiped it to alpha=0. }
+      Surface.ReadPixel(60, 60, B, G, R, A);
+      CheckTrue(A = 255, Format('Background alpha must survive pattern clip, A=%d', [A]));
+      CheckTrue(R > 100, Format('Background must stay red, R=%d', [R]));
+
+      { Gap between tiles but inside the region: background shows through
+        opaque (masked composite is source-over, not alpha-replacing). }
+      Surface.ReadPixel(25, 25, B, G, R, A);
+      CheckTrue(A = 255, Format('In-region gap alpha must be opaque, A=%d', [A]));
+    finally
+      Surface.Free;
+    end;
+  finally
+    Service.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestFT2Engine_BadFontReturnsNil;
+var
+  Engine: TOFDFT2FontEngine;
+  Face: IOFDFontFace;
+  Data: TBytes;
+begin
+  { Regression: OpenMemoryFace always returned a face object even when the
+    FT_Face failed to load, so falling back to TTC face 1 was dead code and
+    failed faces rendered silently blank text. A broken font must resolve to
+    nil (renderer then draws placeholders). }
+  Engine := TOFDFT2FontEngine.Create;
+  try
+    { Too small: the size guard must also reject. }
+    SetLength(Data, 4);
+    FillChar(Data[0], 4, $EE);
+    CheckFalse(Assigned(Engine.OpenMemoryFace(Data, 'test_short')),
+      'A 4-byte "font" must return nil');
+
+    { Garbage bytes: FT_New_Memory_Face must fail -> nil, not a blank face. }
+    SetLength(Data, 64);
+    FillChar(Data[0], 64, $5A);
+    CheckFalse(Assigned(Engine.OpenMemoryFace(Data, 'test_garbage')),
+      'Garbage bytes must not produce a usable face object');
+  finally
+    Engine.Free;
   end;
 end;
 

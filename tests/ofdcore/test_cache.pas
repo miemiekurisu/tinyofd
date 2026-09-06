@@ -40,6 +40,8 @@ type
     procedure TestLRUCache_Put_Overwrite;
     procedure TestLRUCache_CurrentSize;
     procedure TestLRUCache_MaxSize;
+    procedure TestLRUCache_Get_Returns_Touched_Item;
+    procedure TestLRUCache_Eviction_Decrements_Size;
 
     { TPageCacheManager tests }
     procedure TestPageCacheManager_Create;
@@ -47,6 +49,8 @@ type
     procedure TestPageCacheManager_Get_Miss;
     procedure TestPageCacheManager_Clear_AfterCache;
     procedure TestPageCacheManager_Clear;
+    procedure TestPageCacheManager_MaxPages_Eviction;
+    procedure TestPageCacheManager_ByteEviction_WithSize;
 
     { TImageCacheManager tests }
     procedure TestImageCacheManager_Create;
@@ -410,6 +414,51 @@ begin
   end;
 end;
 
+procedure TTestCache.TestLRUCache_Get_Returns_Touched_Item;
+var
+  Cache: TLRUCache;
+  Item, Got: TCacheItem;
+begin
+  { Get 在把条目移到队尾后必须仍返回被访问的那个条目，
+    不能用过期的下标读到别的键 }
+  Cache := TLRUCache.Create(1024);
+  try
+    Item := TCacheItem.Create('a', 1);
+    Cache.Put('a', Item, 1);
+    Item := TCacheItem.Create('b', 1);
+    Cache.Put('b', Item, 1);
+
+    Got := Cache.Get('a');
+    CheckTrue(Assigned(Got), 'a hit');
+    CheckEquals('a', Got.Key, 'Get a returns item a');
+
+    Got := Cache.Get('b');
+    CheckTrue(Assigned(Got), 'b hit');
+    CheckEquals('b', Got.Key, 'Get b returns item b');
+  finally
+    Cache.Free;
+  end;
+end;
+
+procedure TTestCache.TestLRUCache_Eviction_Decrements_Size;
+var
+  Cache: TLRUCache;
+  Item: TCacheItem;
+begin
+  { 条目 Size 必须与 Put 传入值一致，驱逐后 CurrentSize 正确回落 }
+  Cache := TLRUCache.Create(100);
+  try
+    Item := TCacheItem.Create('a', 60);
+    Cache.Put('a', Item, 60);
+    Item := TCacheItem.Create('b', 60);
+    Cache.Put('b', Item, 60);
+    CheckEquals(60, Cache.CurrentSize, 'a evicted, size = 60');
+    CheckEquals(1, Cache.Count, 'one entry left');
+  finally
+    Cache.Free;
+  end;
+end;
+
 { TPageCacheManager }
 
 procedure TTestCache.TestPageCacheManager_Create;
@@ -477,6 +526,55 @@ begin
     Mgr.CachePageBitmap(0, @Dummy, 1.0);
     Mgr.Clear;
     CheckFalse(Assigned(Mgr.GetPageBitmap(0, 1.0)), 'Cleared page is gone');
+  finally
+    Mgr.Free;
+  end;
+end;
+
+procedure TTestCache.TestPageCacheManager_MaxPages_Eviction;
+var
+  Mgr: TPageCacheManager;
+  Dummy: Integer;
+begin
+  { MaxCachedPages 必须被强制执行：缓存第 3 页时最旧的页被逐出 }
+  Mgr := TPageCacheManager.Create(2, 100 * 1024 * 1024);
+  try
+    Mgr.CachePageBitmap(0, @Dummy, 1.0);
+    Mgr.CachePageBitmap(1, @Dummy, 1.0);
+    Mgr.CachePageBitmap(2, @Dummy, 1.0);
+    CheckFalse(Assigned(Mgr.GetPageBitmap(0, 1.0)), 'page 0 evicted when limit reached');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(1, 1.0)), 'page 1 still cached');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(2, 1.0)), 'page 2 cached');
+
+    { 查询命中 page 1、page 2 后：最近使用是 page 2，
+      再缓存新页时 page 1 成为 LRU 被逐出 }
+    Mgr.CachePageBitmap(3, @Dummy, 1.0);
+    CheckFalse(Assigned(Mgr.GetPageBitmap(1, 1.0)), 'LRU page 1 evicted');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(2, 1.0)), 'touched page 2 survives');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(3, 1.0)), 'page 3 cached');
+  finally
+    Mgr.Free;
+  end;
+end;
+
+procedure TTestCache.TestPageCacheManager_ByteEviction_WithSize;
+var
+  Mgr: TPageCacheManager;
+  Dummy: Integer;
+begin
+  { 指定 ASize 后字节预算驱逐生效 }
+  Mgr := TPageCacheManager.Create(10, 100);
+  try
+    Mgr.CachePageBitmap(0, @Dummy, 1.0, 60);
+    CheckTrue(Assigned(Mgr.GetPageBitmap(0, 1.0)), 'page 0 cached');
+
+    Mgr.CachePageBitmap(1, @Dummy, 1.0, 60);
+    CheckFalse(Assigned(Mgr.GetPageBitmap(0, 1.0)), 'byte budget evicts page 0');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(1, 1.0)), 'page 1 cached');
+
+    Mgr.CachePageBitmap(2, @Dummy, 1.0, 60);
+    CheckFalse(Assigned(Mgr.GetPageBitmap(1, 1.0)), 'byte budget evicts page 1');
+    CheckTrue(Assigned(Mgr.GetPageBitmap(2, 1.0)), 'page 2 cached');
   finally
     Mgr.Free;
   end;

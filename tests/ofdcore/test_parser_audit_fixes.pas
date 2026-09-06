@@ -231,7 +231,6 @@ var
   TextObj: TOFDTextObject;
   GlyphRun: TOFDGlyphRun;
   GlyphTr: TOFDGlyphTransform;
-  Glyphs: TStringList;
 begin
   Compiler := TOFDTextRunCompiler.Create(GlobalDiagLogger, 0);
   try
@@ -246,14 +245,9 @@ begin
         GlyphTr.CodePosition := 100; { Out of range }
         GlyphTr.CodeCount := 1;
         GlyphTr.GlyphCount := 1;
-        Glyphs := TStringList.Create;
-        try
-          Glyphs.Add('1');
-          GlyphTr.Glyphs := Glyphs;
-        except
-          Glyphs.Free;
-          raise;
-        end;
+        { Fill the constructor-created list; do not replace it. }
+        GlyphTr.Glyphs.Clear;
+        GlyphTr.Glyphs.Add('1');
         TextObj.CGTransforms.Add(GlyphTr);
       except
         GlyphTr.Free;
@@ -280,7 +274,6 @@ var
   TextObj: TOFDTextObject;
   GlyphRun: TOFDGlyphRun;
   GlyphTr: TOFDGlyphTransform;
-  Glyphs: TStringList;
 begin
   Compiler := TOFDTextRunCompiler.Create(GlobalDiagLogger, 0);
   try
@@ -294,14 +287,9 @@ begin
         GlyphTr.CodePosition := -1;
         GlyphTr.CodeCount := 1;
         GlyphTr.GlyphCount := 1;
-        Glyphs := TStringList.Create;
-        try
-          Glyphs.Add('1');
-          GlyphTr.Glyphs := Glyphs;
-        except
-          Glyphs.Free;
-          raise;
-        end;
+        { Fill the constructor-created list; do not replace it. }
+        GlyphTr.Glyphs.Clear;
+        GlyphTr.Glyphs.Add('1');
         TextObj.CGTransforms.Add(GlyphTr);
       except
         GlyphTr.Free;
@@ -327,7 +315,6 @@ var
   TextObj: TOFDTextObject;
   GlyphRun: TOFDGlyphRun;
   GlyphTr: TOFDGlyphTransform;
-  Glyphs: TStringList;
 begin
   Compiler := TOFDTextRunCompiler.Create(GlobalDiagLogger, 0);
   try
@@ -341,16 +328,11 @@ begin
         GlyphTr.CodePosition := 0;
         GlyphTr.CodeCount := 3;
         GlyphTr.GlyphCount := 3;
-        Glyphs := TStringList.Create;
-        try
-          Glyphs.Add('1');
-          Glyphs.Add('2');
-          Glyphs.Add('3');
-          GlyphTr.Glyphs := Glyphs;
-        except
-          Glyphs.Free;
-          raise;
-        end;
+        { Fill the constructor-created list; do not replace it. }
+        GlyphTr.Glyphs.Clear;
+        GlyphTr.Glyphs.Add('1');
+        GlyphTr.Glyphs.Add('2');
+        GlyphTr.Glyphs.Add('3');
         TextObj.CGTransforms.Add(GlyphTr);
       except
         GlyphTr.Free;
@@ -378,7 +360,6 @@ var
   TextObj: TOFDTextObject;
   GlyphRun: TOFDGlyphRun;
   GlyphTr: TOFDGlyphTransform;
-  Glyphs: TStringList;
 begin
   Compiler := TOFDTextRunCompiler.Create(GlobalDiagLogger, 0);
   try
@@ -393,16 +374,12 @@ begin
         GlyphTr.CodePosition := 0;
         GlyphTr.CodeCount := 3;
         GlyphTr.GlyphCount := 3;
-        Glyphs := TStringList.Create;
-        try
-          Glyphs.Add('10');
-          Glyphs.Add('20');
-          Glyphs.Add('30');
-          GlyphTr.Glyphs := Glyphs;
-        except
-          Glyphs.Free;
-          raise;
-        end;
+        { Fill the list created in the constructor - do NOT replace it
+          (assignment would leak the original list). }
+        GlyphTr.Glyphs.Clear;
+        GlyphTr.Glyphs.Add('10');
+        GlyphTr.Glyphs.Add('20');
+        GlyphTr.Glyphs.Add('30');
         TextObj.CGTransforms.Add(GlyphTr);
       except
         GlyphTr.Free;
@@ -414,15 +391,9 @@ begin
         GlyphTr.CodePosition := 3;
         GlyphTr.CodeCount := 2;
         GlyphTr.GlyphCount := 2;
-        Glyphs := TStringList.Create;
-        try
-          Glyphs.Add('40');
-          Glyphs.Add('50');
-          GlyphTr.Glyphs := Glyphs;
-        except
-          Glyphs.Free;
-          raise;
-        end;
+        GlyphTr.Glyphs.Clear;
+        GlyphTr.Glyphs.Add('40');
+        GlyphTr.Glyphs.Add('50');
         TextObj.CGTransforms.Add(GlyphTr);
       except
         GlyphTr.Free;
@@ -446,3 +417,4 @@ initialization
   RegisterTest('Parser Audit Fixes', TTestParserAuditFixes.Suite);
 
 end.
+

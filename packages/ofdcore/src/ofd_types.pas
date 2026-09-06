@@ -9,6 +9,25 @@ uses
   Classes, SysUtils, Math;
 
 function ExtractLocalName(const AQualifiedName: String): String;
+{ Pure bitmap size estimate for cache budget accounting (32bpp RGBA).
+  Negative/zero dimensions yield 0 so a malformed bitmap can never inflate
+  a byte budget. }
+function OFDBitmapBytes(const AWidth, AHeight: Integer): Int64;
+{ Clamp a view zoom so the rendered surface stays within AMaxDim square pixels.
+  Mirrors the DoPaint clamp in TOFDPageView; keep zoom keys and the render
+  zoom consistent so the page cache cannot hold entries whose unrealized
+  (uncapped) dimensions would be used as a key. }
+function OFDComputeRenderZoom(const AWidthPx, AHeightPx: Integer;
+  AZoom, AMaxDim: Double): Double;
+{ Tombstone-compaction predicate for request queues: compact when strictly
+  more than half of the entries are invalid, so a busy queue never rebuilds
+  on every request and an idle-but-cluttered queue is always rebuilt. }
+function OFDShouldCompactQueue(const ATombstones, ATotalEntries: Integer): Boolean;
+{ Eviction predicate for the render worker's parsed-page LRU cache: evict
+  (oldest) entries whenever the cache is at capacity. A capacity <= 0 makes
+  the cache a no-op (nothing stays cached) instead of an eviction loop
+  against an empty list. }
+function OFDParsedPageShouldEvict(const ACount, ACapacity: Integer): Boolean;
 
 type
 
@@ -293,6 +312,44 @@ begin
   I := Pos(':', AQualifiedName);
   if I > 0 then
     Result := Copy(AQualifiedName, I + 1, Length(AQualifiedName) - I);
+end;
+
+function OFDBitmapBytes(const AWidth, AHeight: Integer): Int64;
+begin
+  if (AWidth <= 0) or (AHeight <= 0) then
+    Exit(0);
+  Result := Int64(AWidth) * Int64(AHeight) * 4;
+end;
+
+function OFDComputeRenderZoom(const AWidthPx, AHeightPx: Integer;
+  AZoom, AMaxDim: Double): Double;
+begin
+  Result := AZoom;
+  if (AWidthPx > 0) and (AWidthPx * Result > AMaxDim) then
+    Result := AMaxDim / AWidthPx;
+  if (AHeightPx > 0) and (AHeightPx * Result > AMaxDim) then
+    Result := AMaxDim / AHeightPx;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function OFDShouldCompactQueue(const ATombstones, ATotalEntries: Integer): Boolean;
+begin
+  { Defensive: ATombstones is counted among ATotalEntries by callers; a count
+    exceeding the total is a contradictory caller state -> don't rebuild. }
+  if (ATombstones < 0) or (ATotalEntries < 0) or (ATombstones > ATotalEntries) then
+    Exit(False);
+  Result := (ATombstones > 0) and (ATombstones * 2 > ATotalEntries);
+end;
+
+function OFDParsedPageShouldEvict(const ACount, ACapacity: Integer): Boolean;
+begin
+  { Capacity <= 0 is legal (cache disabled): keep the list empty. Otherwise
+    evict as soon as the cache is at capacity so a subsequent insert either
+    replaces an evicted slot or fits under the cap. }
+  if ACapacity <= 0 then
+    Exit(ACount > 0);
+  Result := ACount >= ACapacity;
 end;
 
 
@@ -642,25 +699,45 @@ var
   I: Integer;
 begin
   if not Assigned(AParent) then Exit;
-  { Parent values fill in where child hasn't set them }
+  { Parent values fill in where child hasn't set them.
+    复制值的同时必须置 *Set 标记，否则该值无法沿 Relative 链继续向下传递 }
   if not FLineWidthSet and AParent.FLineWidthSet then
   begin
     FLineWidth := AParent.FLineWidth;
+    FLineWidthSet := True;
   end;
   if not FJoinSet and AParent.FJoinSet then
+  begin
     FJoin := AParent.FJoin;
+    FJoinSet := True;
+  end;
   if not FCapSet and AParent.FCapSet then
+  begin
     FCap := AParent.FCap;
+    FCapSet := True;
+  end;
   if not FDashOffsetSet and AParent.FDashOffsetSet then
+  begin
     FDashOffset := AParent.FDashOffset;
+    FDashOffsetSet := True;
+  end;
   if (FDashPattern = nil) and (AParent.FDashPattern <> nil) then
     FDashPattern := Copy(AParent.FDashPattern);
   if not FMiterLimitSet and AParent.FMiterLimitSet then
+  begin
     FMiterLimit := AParent.FMiterLimit;
+    FMiterLimitSet := True;
+  end;
   if not FFillColorSet and AParent.FFillColorSet then
+  begin
     FFillColor := AParent.FFillColor;
+    FFillColorSet := True;
+  end;
   if not FStrokeColorSet and AParent.FStrokeColorSet then
+  begin
     FStrokeColor := AParent.FStrokeColor;
+    FStrokeColorSet := True;
+  end;
 end;
 
 { TOFDColorSpec — factory functions }

@@ -51,6 +51,12 @@ type
     procedure TestGroup_RandomCTM;
     procedure TestLayerDrawParam_InheritsStrokeColor;
     procedure TestLayerDrawParam_NoInheritWithoutDrawParam;
+    procedure TestImage_BoundaryWidthHeightScales;
+    procedure TestImage_BoundaryZeroKeepsIdentity;
+    procedure TestImage_CTMScaleNotCompounded;
+    procedure TestImage_CTMRotationNormalized;
+    procedure TestParseColor_RGB_OverRangeClamped;
+    procedure TestParseColor_Gray_OverRangeClamped;
   private
     procedure AddDrawParamLayer(const ADrawParamID: String);
     function FindStrokeColor(out AR: Double): Boolean;
@@ -883,6 +889,207 @@ begin
   Found := FindStrokeColor(R);
   CheckTrue(Found, 'Should emit a stroke path command');
   CheckEquals(0, R, 0.5, 'Without DrawParam stroke red should stay default 0');
+end;
+
+{ Regression: ImageObject Boundary width/height must drive the destination size
+  (unit image stretched to W/H mm, like the signature stamp matrix). Previously
+  only CTM + Left/Top were compiled, so an image with Boundary="0 0 50 80" and
+  identity CTM rendered a few pixels wide. }
+procedure TTestPageCompilerTransform.TestImage_BoundaryWidthHeightScales;
+var
+  Img: TOFDImageObject;
+  DL: TOFDDisplayList;
+  I, FoundIdx: Integer;
+  Cmd: TOFDCommand;
+begin
+  Img := TOFDImageObject.Create('img1');
+  try
+    Img.Left := 10;
+    Img.Top := 20;
+    Img.Width := 50;
+    Img.Height := 80;
+    DL := TOFDDisplayList.Create;
+    try
+      FCompiler.CompileImageObject(Img, DL);
+      FoundIdx := -1;
+      for I := 0 to DL.CommandCount - 1 do
+        if DL.GetCommand(I).CommandType = ctDrawImage then
+          FoundIdx := I;
+      CheckTrue(FoundIdx >= 0, 'CompileImageObject must emit a DrawImage command');
+      if FoundIdx < 0 then Exit;
+      Cmd := DL.GetCommand(FoundIdx);
+      CheckEquals(50, TOFDImageCommand(Cmd).ImageMatrix[0, 0], 0.001,
+        'ImageMatrix[0,0] must scale the unit image to Boundary width (mm)');
+      CheckEquals(80, TOFDImageCommand(Cmd).ImageMatrix[1, 1], 0.001,
+        'ImageMatrix[1,1] must scale the unit image to Boundary height (mm)');
+      CheckEquals(10, TOFDImageCommand(Cmd).ImageMatrix[0, 2], 0.001,
+        'ImageMatrix translation must include Boundary left');
+      CheckEquals(20, TOFDImageCommand(Cmd).ImageMatrix[1, 2], 0.001,
+        'ImageMatrix translation must include Boundary top');
+    finally
+      DL.Free;
+    end;
+  finally
+    Img.Free;
+  end;
+end;
+
+{ With no Boundary dimensions (0) the old placement behaviour is preserved:
+  scale stays 1. }
+procedure TTestPageCompilerTransform.TestImage_BoundaryZeroKeepsIdentity;
+var
+  Img: TOFDImageObject;
+  DL: TOFDDisplayList;
+  I, FoundIdx: Integer;
+  Cmd: TOFDCommand;
+begin
+  Img := TOFDImageObject.Create('img2');
+  try
+    Img.Left := 5;
+    Img.Top := 6;
+    { Width/Height stay 0 }
+    DL := TOFDDisplayList.Create;
+    try
+      FCompiler.CompileImageObject(Img, DL);
+      FoundIdx := -1;
+      for I := 0 to DL.CommandCount - 1 do
+        if DL.GetCommand(I).CommandType = ctDrawImage then
+          FoundIdx := I;
+      CheckTrue(FoundIdx >= 0, 'CompileImageObject must emit a DrawImage command');
+      if FoundIdx < 0 then Exit;
+      Cmd := DL.GetCommand(FoundIdx);
+      CheckEquals(1, TOFDImageCommand(Cmd).ImageMatrix[0, 0], 0.001,
+        'Zero Boundary width must keep scale 1');
+      CheckEquals(1, TOFDImageCommand(Cmd).ImageMatrix[1, 1], 0.001,
+        'Zero Boundary height must keep scale 1');
+    finally
+      DL.Free;
+    end;
+  finally
+    Img.Free;
+  end;
+end;
+
+{ Regression: containsJPEG.ofd carries CTM="145.3829 0 0 109.0266 0 0" together
+  with Boundary W/H of the same magnitude. The CTM scale must not compound with
+  Boundary W/H (that rendered the image at W*W x H*H mm, one magnified corner
+  filling the page). With both dimensions present the CTM contributes
+  orientation only. }
+procedure TTestPageCompilerTransform.TestImage_CTMScaleNotCompounded;
+var
+  Img: TOFDImageObject;
+  DL: TOFDDisplayList;
+  I, FoundIdx: Integer;
+  Cmd: TOFDCommand;
+  M: TOFDMatrix;
+begin
+  Img := TOFDImageObject.Create('img3');
+  try
+    Img.Left := 31.743;
+    Img.Top := 25.6484;
+    Img.Width := 145.3829;
+    Img.Height := 109.0266;
+    M := MatrixIdentity;
+    M[0,0] := 145.3829;
+    M[1,1] := 109.0266;
+    Img.CTM := M;
+    DL := TOFDDisplayList.Create;
+    try
+      FCompiler.CompileImageObject(Img, DL);
+      FoundIdx := -1;
+      for I := 0 to DL.CommandCount - 1 do
+        if DL.GetCommand(I).CommandType = ctDrawImage then
+          FoundIdx := I;
+      CheckTrue(FoundIdx >= 0, 'CompileImageObject must emit a DrawImage command');
+      if FoundIdx < 0 then Exit;
+      Cmd := DL.GetCommand(FoundIdx);
+      CheckEquals(145.3829, TOFDImageCommand(Cmd).ImageMatrix[0, 0], 0.001,
+        'Scaled CTM must not compound with Boundary width');
+      CheckEquals(109.0266, TOFDImageCommand(Cmd).ImageMatrix[1, 1], 0.001,
+        'Scaled CTM must not compound with Boundary height');
+      CheckEquals(31.743, TOFDImageCommand(Cmd).ImageMatrix[0, 2], 0.001,
+        'Translation must be Boundary left');
+      CheckEquals(25.6484, TOFDImageCommand(Cmd).ImageMatrix[1, 2], 0.001,
+        'Translation must be Boundary top');
+    finally
+      DL.Free;
+    end;
+  finally
+    Img.Free;
+  end;
+end;
+
+{ A rotation CTM keeps its orientation: the normalized basis vectors are scaled
+  by Boundary W/H (90-degree rotation of a 10x20 mm image). }
+procedure TTestPageCompilerTransform.TestImage_CTMRotationNormalized;
+var
+  Img: TOFDImageObject;
+  DL: TOFDDisplayList;
+  I, FoundIdx: Integer;
+  Cmd: TOFDCommand;
+  M: TOFDMatrix;
+begin
+  Img := TOFDImageObject.Create('img4');
+  try
+    Img.Left := 2;
+    Img.Top := 3;
+    Img.Width := 10;
+    Img.Height := 20;
+    M := MatrixIdentity;
+    M[0,0] := 0;
+    M[0,1] := 1;   { X basis points down }
+    M[1,0] := -1;  { Y basis points left }
+    M[1,1] := 0;
+    M[0,2] := 5;
+    M[1,2] := 5;
+    Img.CTM := M;
+    DL := TOFDDisplayList.Create;
+    try
+      FCompiler.CompileImageObject(Img, DL);
+      FoundIdx := -1;
+      for I := 0 to DL.CommandCount - 1 do
+        if DL.GetCommand(I).CommandType = ctDrawImage then
+          FoundIdx := I;
+      CheckTrue(FoundIdx >= 0, 'CompileImageObject must emit a DrawImage command');
+      if FoundIdx < 0 then Exit;
+      Cmd := DL.GetCommand(FoundIdx);
+      CheckEquals(0, TOFDImageCommand(Cmd).ImageMatrix[0, 0], 0.001,
+        'Rotated X basis keeps zero X component');
+      CheckEquals(10, TOFDImageCommand(Cmd).ImageMatrix[0, 1], 0.001,
+        'Rotated X basis is normalized and scaled by Boundary width');
+      CheckEquals(-20, TOFDImageCommand(Cmd).ImageMatrix[1, 0], 0.001,
+        'Rotated Y basis is normalized and scaled by Boundary height');
+      CheckEquals(7, TOFDImageCommand(Cmd).ImageMatrix[0, 2], 0.001,
+        'CTM translation plus Boundary left');
+      CheckEquals(8, TOFDImageCommand(Cmd).ImageMatrix[1, 2], 0.001,
+        'CTM translation plus Boundary top');
+    finally
+      DL.Free;
+    end;
+  finally
+    Img.Free;
+  end;
+end;
+
+{ Regression: a color component outside the expected range (e.g. "600") must be
+  clamped to [0,1] after the 0-255 normalization, not left at 2.35 where the
+  renderer's Byte conversion overflows. }
+procedure TTestPageCompilerTransform.TestParseColor_RGB_OverRangeClamped;
+var
+  C: TOFDColor;
+begin
+  C := FCompiler.ParseColor('255 600 -20');
+  CheckEquals(1.0, C.FValues[0], 0.001, '255 must normalize to 1');
+  CheckEquals(1.0, C.FValues[1], 0.001, '600 -> 600/255 -> clamped to 1');
+  CheckEquals(0.0, C.FValues[2], 0.001, '-20 -> clamped to 0');
+end;
+
+procedure TTestPageCompilerTransform.TestParseColor_Gray_OverRangeClamped;
+var
+  C: TOFDColor;
+begin
+  C := FCompiler.ParseColor('400');
+  CheckEquals(1.0, C.FValues[0], 0.001, '400 -> 400/255 -> clamped to 1');
 end;
 
 initialization

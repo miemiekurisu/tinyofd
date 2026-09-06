@@ -326,6 +326,7 @@ procedure TOFDDOMHandler.StartElement(const AName: String; const Attrs: TOFDXMLA
 var
   Node: TOFDXMLNode;
   Parent: TOFDXMLNode;
+  Text: String;
   I: Integer;
 begin
   Node := TOFDXMLNode.Create(AName);
@@ -337,7 +338,27 @@ begin
   if Parent <> nil then
     Parent.AddChild(Node)
   else if FRoot = nil then
-    FRoot := Node;
+    FRoot := Node
+  else
+  begin
+    { 第二个顶层元素：既无父节点也无 Root 归属，直接释放，
+      否则该节点无人持有而泄漏 }
+    Node.Free;
+    Node := nil;
+    FTextBuf.Length := 0;
+    Exit;
+  end;
+
+  { 把子元素开启前缓冲的文本刷进父节点，避免混合内容在清空 FTextBuf 时丢失
+    （与 EndElement 同样的追加语义） }
+  Text := FTextBuf.ToString;
+  if Text <> '' then
+  begin
+    if Parent.FTextContent = '' then
+      Parent.FTextContent := Text
+    else
+      Parent.FTextContent := Parent.FTextContent + Text;
+  end;
 
   FNodes.Push(Node);
   { Reuse the text buffer instead of allocating a new TStringBuilder per
@@ -825,12 +846,18 @@ class function TOFDXMLParser.ParseDouble(const AValue: String; const ADefault: D
 var
   S: String;
   I: Integer;
+  FS: TFormatSettings;
 begin
   S := Trim(AValue);
   if S = '' then Exit(ADefault);
   for I := 1 to Length(S) do
     if S[I] = ',' then S[I] := '.';
-  Result := StrToFloatDef(S, ADefault);
+  { 用固定小数点格式解析：默认 StrToFloatDef 走系统 locale，
+    在 '.' 不是小数分隔符的 locale 下（如德语）会解析错误 }
+  FS := SysUtils.FormatSettings;
+  FS.DecimalSeparator := '.';
+  FS.ThousandSeparator := #0;
+  Result := StrToFloatDef(S, ADefault, FS);
 end;
 
 class function TOFDXMLParser.ParseInt(const AValue: String; const ADefault: Integer): Integer;

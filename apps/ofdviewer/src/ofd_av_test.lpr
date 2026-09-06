@@ -102,14 +102,21 @@ var
   P: PByteArray;
   SkipBMP: Boolean;
   I: Integer;
+  RunIdx: Integer;
 begin
   Application.Initialize;
   WriteLn('=== AV Test ===');
   GlobalDiagLogger.Enable;
   GlobalDiagLogger.SetOutput('_tmp/diag_render.log');
   SkipBMP := False;
+  PageIdx := -1;
   for I := 1 to ParamCount do
+  begin
     if SameText(ParamStr(I), '--no-write') then SkipBMP := True;
+    { Optional: render only one page (0-based), e.g. --page=0 }
+    if Pos('--page=', ParamStr(I)) = 1 then
+      PageIdx := StrToIntDef(Copy(ParamStr(I), 8, MaxInt), 0);
+  end;
   if ParamCount < 1 then
   begin
     WriteLn('Usage: ofd_av_test.exe <ofd_file> [--no-write]');
@@ -122,9 +129,15 @@ begin
     Doc.Open(ParamStr(1));
     WriteLn('Opened: ', Doc.PageCount, ' pages');
     PageCountCache := Doc.PageCount;
-    PageIdx := 0;
-    while PageIdx < PageCountCache do
+    RunIdx := 0;
+    while RunIdx < PageCountCache do
     begin
+      if (PageIdx >= 0) and (RunIdx <> PageIdx) then
+      begin
+        Inc(RunIdx);
+        Continue;
+      end;
+      PageIdx := RunIdx;
       WriteLn('Page ', PageIdx, '...');
       try
         Entry := Doc.GetPageEntryByIndex(PageIdx);
@@ -200,7 +213,7 @@ begin
         on E: Exception do
           WriteLn('  EXCEPTION: ', E.ClassName, ' - ', E.Message);
       end;
-      Inc(PageIdx);
+      Inc(RunIdx);
     end;
   except
     on E: Exception do

@@ -47,6 +47,7 @@ type
     FMissCount: Integer;
     procedure EvictLeastRecentlyUsed;
     procedure UpdateAccessTime(Index: Integer);
+    function GetItemCount: Integer;
   public
     constructor Create(AMaxSize: Integer);
     destructor Destroy; override;
@@ -55,8 +56,11 @@ type
     procedure Remove(const AKey: String);
     procedure Clear;
     function GetHitRate: Double;
+    { 驱逐最久未使用的一项，供基于条目数的上限策略使用 }
+    procedure EvictOldest;
     property MaxSize: Integer read FMaxSize;
     property CurrentSize: Integer read FCurrentSize;
+    property Count: Integer read GetItemCount;
     property HitCount: Integer read FHitCount;
     property MissCount: Integer read FMissCount;
     property HitRate: Double read GetHitRate;
@@ -69,13 +73,15 @@ type
     FMaxCachedPages: Integer;
     FMaxCacheBytes: Integer;
     function GetCachedPage(APageIndex: Integer; AZoom: Double): Pointer;
-    procedure CachePage(APageIndex: Integer; ABitmap: Pointer; AZoom: Double);
+    procedure CachePage(APageIndex: Integer; ABitmap: Pointer; AZoom: Double; ASize: Integer);
     procedure RemoveCachedPage(APageIndex: Integer; AZoom: Double);
   public
     constructor Create(AMaxPages: Integer; AMaxBytes: Integer);
     destructor Destroy; override;
     function GetPageBitmap(APageIndex: Integer; AZoom: Double): Pointer;
-    procedure CachePageBitmap(APageIndex: Integer; ABitmap: Pointer; AZoom: Double);
+    { ASize: bitmap 字节大小估计，>0 时启用字节预算驱逐；0 时仅靠
+      MaxCachedPages 条目数驱逐。BitmapData 由调用方拥有并释放，缓存不释放。 }
+    procedure CachePageBitmap(APageIndex: Integer; ABitmap: Pointer; AZoom: Double; ASize: Integer = 0);
     procedure Clear;
     property MaxCachedPages: Integer read FMaxCachedPages;
     property MaxCacheBytes: Integer read FMaxCacheBytes;
@@ -90,7 +96,9 @@ type
     constructor Create(AMaxBytes: Integer);
     destructor Destroy; override;
     function GetImage(const AKey: String): Pointer;
-    procedure CacheImage(const AKey: String; ABitmap: Pointer);
+    { ASize: bitmap 字节大小估计，>0 时启用字节预算驱逐。
+      BitmapData 由调用方拥有并释放，缓存不释放。 }
+    procedure CacheImage(const AKey: String; ABitmap: Pointer; ASize: Integer = 0);
     procedure RemoveImage(const AKey: String);
     procedure Clear;
     property MaxCacheBytes: Integer read FMaxCacheBytes;
@@ -172,7 +180,7 @@ end;
 
 destructor TBitmapCacheItem.Destroy;
 begin
-  // BitmapData 由所有者释放
+  { BitmapData 由调用方拥有（缓存只在销毁条目时丢弃引用） }
   inherited Destroy;
 end;
 
@@ -188,7 +196,7 @@ end;
 
 destructor TPageCacheItem.Destroy;
 begin
-  // BitmapData 由所有者释放
+  { BitmapData 由调用方拥有（缓存只在销毁条目时丢弃引用） }
   inherited Destroy;
 end;
 
@@ -258,9 +266,20 @@ begin
   OldItem.Free;
 end;
 
+procedure TLRUCache.EvictOldest;
+begin
+  EvictLeastRecentlyUsed;
+end;
+
+function TLRUCache.GetItemCount: Integer;
+begin
+  Result := FItems.Count;
+end;
+
 function TLRUCache.Get(const AKey: String): TCacheItem;
 var
   Index: Integer;
+  Item: TCacheItem;
 begin
   Index := FKeys.IndexOf(AKey);
   if Index = -1 then
@@ -271,8 +290,11 @@ begin
   end;
   
   Inc(FHitCount);
+  { 捕获条目必须在 UpdateAccessTime 之前：它会删除并重插条目，
+    使旧下标指向错误的条目 }
+  Item := TCacheItem(FItems[Index]);
   UpdateAccessTime(Index);
-  Result := TCacheItem(FItems[Index]);
+  Result := Item;
 end;
 
 procedure TLRUCache.Put(const AKey: String; AItem: TCacheItem; ASize: Integer);
@@ -308,6 +330,8 @@ begin
   
   // 添加新项
   AItem.LastAccessTime := GetNowTicks;
+  { 仅记录条目大小保证 Remove/Evict 后 FCurrentSize 扣减正确 }
+  AItem.Size := ASize;
   FItems.Add(AItem);
   FKeys.Add(AKey);
   FCurrentSize := FCurrentSize + ASize;
@@ -370,16 +394,17 @@ begin
     Result := nil;
 end;
 
-procedure TPageCacheManager.CachePage(APageIndex: Integer; ABitmap: Pointer; AZoom: Double);
+procedure TPageCacheManager.CachePage(APageIndex: Integer; ABitmap: Pointer; AZoom: Double; ASize: Integer);
 var
   Key: String;
   CacheItem: TPageCacheItem;
-  Size: Integer;
 begin
   Key := Format('page_%d_zoom_%f', [APageIndex, AZoom]);
-  Size := 0;  // 无法计算大小，由调用者指定
+  { 条目数上限兜底兜住 Size 未知的条目，防止无限增长；字节预算由 TLRUCache.Put 执行 }
+  while (FMaxCachedPages > 0) and (FCache.Count >= FMaxCachedPages) do
+    FCache.EvictOldest;
   CacheItem := TPageCacheItem.Create(Key, ABitmap, APageIndex, AZoom);
-  FCache.Put(Key, CacheItem, Size);
+  FCache.Put(Key, CacheItem, ASize);
 end;
 
 procedure TPageCacheManager.RemoveCachedPage(APageIndex: Integer; AZoom: Double);
@@ -395,9 +420,9 @@ begin
   Result := GetCachedPage(APageIndex, AZoom);
 end;
 
-procedure TPageCacheManager.CachePageBitmap(APageIndex: Integer; ABitmap: Pointer; AZoom: Double);
+procedure TPageCacheManager.CachePageBitmap(APageIndex: Integer; ABitmap: Pointer; AZoom: Double; ASize: Integer);
 begin
-  CachePage(APageIndex, ABitmap, AZoom);
+  CachePage(APageIndex, ABitmap, AZoom, ASize);
 end;
 
 procedure TPageCacheManager.Clear;
@@ -431,14 +456,9 @@ begin
     Result := nil;
 end;
 
-procedure TImageCacheManager.CacheImage(const AKey: String; ABitmap: Pointer);
-var
-  CacheItem: TBitmapCacheItem;
-  Size: Integer;
+procedure TImageCacheManager.CacheImage(const AKey: String; ABitmap: Pointer; ASize: Integer);
 begin
-  Size := 0;  // 无法计算大小，由调用者指定
-  CacheItem := TBitmapCacheItem.Create(AKey, ABitmap);
-  FCache.Put(AKey, CacheItem, Size);
+  FCache.Put(AKey, TBitmapCacheItem.Create(AKey, ABitmap), ASize);
 end;
 
 procedure TImageCacheManager.RemoveImage(const AKey: String);

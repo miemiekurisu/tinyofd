@@ -21,6 +21,7 @@ type
     procedure TestFontListParsed;
     procedure TestFontFilePathCorrect;
     procedure TestReadTTFName;
+    procedure TestFontDataLazyLoadOnRead;
   end;
 
 implementation
@@ -123,6 +124,25 @@ begin
   finally
     Stream.Free;
   end;
+end;
+
+procedure TTestFontChain.TestFontDataLazyLoadOnRead;
+var
+  FontRes: TOFDFontResource;
+begin
+  { Regression: Open no longer eagerly loads font bytes (A4 lazy). Reading
+    FontData through the property must lazily load the bytes from the package
+    and mark the resource DataLoaded, so provider-based rendering keeps
+    working without an explicit LoadAllFontData. }
+  FontRes := FDoc.ResourceManager.FindFontByID('11');
+  CheckTrue(Assigned(FontRes), 'Font ID 11 exists');
+  CheckTrue(FontRes.FilePath <> '', 'font has a package path');
+  CheckTrue(Length(FontRes.FontData) > 0,
+    'FontData property lazily loads bytes on first read');
+  CheckTrue(FontRes.DataLoaded, 'DataLoaded set after lazy load');
+  { Lazy is per-font: a font whose bytes were never read stays unloaded. }
+  CheckEquals(False, FDoc.ResourceManager.FindFontByID('3').DataLoaded,
+    'untouched font stays lazily unloaded');
 end;
 
 initialization

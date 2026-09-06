@@ -17,6 +17,7 @@ type
     procedure TestPageSizeFromContentFallback;
     procedure TestPageSizeContentOverridesCommonData;
     procedure TestTextGradientFillFallsBackToFirstColor;
+    procedure TestStrokeOnlyVectorGlyphStaysHollow;
     procedure TestDocumentCreate;
     procedure TestDocumentDestroy;
     procedure TestDocumentIsOpen;
@@ -317,6 +318,57 @@ begin
         end;
       end;
       CheckTrue(Found, 'gradient company-intro title not found on page index 4');
+    finally
+      Page.Free;
+    end;
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDDocumentModels.TestStrokeOnlyVectorGlyphStaysHollow;
+var
+  F: String;
+  Doc: TOFDDocument;
+  Entry: TOFDPageEntry;
+  Page: TOFDPage;
+  I: Integer;
+  PathObj: TOFDPathObject;
+  Found: Boolean;
+begin
+  { intro-数科.ofd page 0 draws "数科/Trail Version" as vector letter
+    outlines: PathObject with only <StrokeColor> and no Fill/Stroke attrs.
+    GB/T 33190 table 35: Stroke defaults true, Fill defaults true, but
+    FillColor defaults transparent - the net effect is hollow outline text.
+    The glyph must NOT be converted to a solid filled glyph (old compat
+    hack removed). }
+  Found := False;
+  F := GetTestDocPath('intro-数科.ofd');
+  if F = '' then Exit;
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(F);
+    Entry := Doc.GetPageEntryByIndex(0);
+    if Entry = nil then Exit;
+    Page := TOFDPage.Create(Doc, Entry);
+    try
+      for I := 0 to Page.Objects.Count - 1 do
+      begin
+        if Page.Objects[I] is TOFDPathObject then
+        begin
+          PathObj := TOFDPathObject(Page.Objects[I]);
+          if PathObj.ObjectId = '2117' then
+          begin
+            Found := True;
+            CheckTrue(PathObj.Stroke, 'stroke-only glyph must keep stroke=true');
+            CheckEquals('', PathObj.FillColor, 'no FillColor element must stay empty (transparent)');
+            CheckTrue(PathObj.StrokeColor <> '', 'stroke color must be parsed');
+            CheckTrue(PathObj.FillColorSet = False, 'FillColorSet must not be synthesized');
+            Break;
+          end;
+        end;
+      end;
+      CheckTrue(Found, 'outline vector glyph ID 2117 not found on page 0');
     finally
       Page.Free;
     end;

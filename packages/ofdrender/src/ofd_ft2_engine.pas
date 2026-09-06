@@ -39,6 +39,10 @@ type
     constructor CreateFromMemory(const AFontBytes: TBytes;
       const AResourceKey: AnsiString; AFaceIndex: Integer);
     destructor Destroy; override;
+    { False when the FT_Face could not be created (defective font). Callers
+      must treat such a face as nil - a face without FFace would render
+      silently blank text. }
+    function IsValid: Boolean;
     function GetUnitsPerEm: Cardinal;
     function GetGlyphCount: Cardinal;
     function LoadGlyphOutline(AGlyphID: Cardinal;
@@ -223,6 +227,11 @@ begin
   inherited Destroy;
 end;
 
+function TOFDFT2FontFace.IsValid: Boolean;
+begin
+  Result := (FLib <> nil) and (FFace <> nil);
+end;
+
 function TOFDFT2FontFace.GetUnitsPerEm: Cardinal;
 begin
   Result := FUnitsPerEm;
@@ -367,13 +376,20 @@ end;
 
 function TOFDFT2FontEngine.OpenMemoryFace(const AFontBytes: TBytes;
   const AResourceKey: AnsiString): IOFDFontFace;
+var
+  Face: TOFDFT2FontFace;
 begin
+  Result := nil;
   if Length(AFontBytes) < 12 then
-  begin
-    Result := nil;
     Exit;
-  end;
-  Result := TOFDFT2FontFace.CreateFromMemory(AFontBytes, AResourceKey, -1);
+  { A constructor always yields an instance, so failures must be detected via
+    IsValid: a broken font must return nil (renderers then draw placeholders)
+    instead of a face that renders silently blank text. }
+  Face := TOFDFT2FontFace.CreateFromMemory(AFontBytes, AResourceKey, -1);
+  if not Face.IsValid then
+    Face.Free
+  else
+    Result := Face;
 end;
 
 function TOFDFT2FontEngine.ResolveSystemFont(
@@ -383,6 +399,7 @@ var
   Stream: TFileStream;
   Bytes: TBytes;
   FontsDir: String;
+  Face: TOFDFT2FontFace;
 
   function FontExists(const AFilename: String): Boolean;
   var
@@ -471,10 +488,18 @@ begin
     Result := nil;
     Exit;
   end;
-  { Try face 0, then face 1 for TTC system fonts. }
-  Result := TOFDFT2FontFace.CreateFromMemory(Bytes, 'system:' + AFamilyName, 0);
-  if not Assigned(Result) then
-    Result := TOFDFT2FontFace.CreateFromMemory(Bytes, 'system:' + AFamilyName, 1);
+  { Try face 0, then face 1 for TTC system fonts; keep only a valid face. }
+  Result := nil;
+  Face := TOFDFT2FontFace.CreateFromMemory(Bytes, 'system:' + AFamilyName, 0);
+  if not Face.IsValid then
+  begin
+    Face.Free;
+    Face := TOFDFT2FontFace.CreateFromMemory(Bytes, 'system:' + AFamilyName, 1);
+  end;
+  if not Face.IsValid then
+    Face.Free
+  else
+    Result := Face;
 end;
 
 end.

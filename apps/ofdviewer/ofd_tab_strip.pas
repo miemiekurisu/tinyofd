@@ -103,9 +103,15 @@ procedure TOFDTabStrip.RemoveTab(AIndex: Integer);
 begin
   if (AIndex < 0) or (AIndex >= FTabs.Count) then Exit;
   FTabs.Delete(AIndex);
-  if FActiveIndex >= FTabs.Count then FActiveIndex := FTabs.Count - 1;
-  if FHoverIndex >= FTabs.Count then FHoverIndex := FTabs.Count - 1;
-  if FHoverClose >= FTabs.Count then FHoverClose := FTabs.Count - 1;
+  { Removing an earlier tab shifts later tabs left, so an active/hover index
+    past the removed slot must follow it; only if it pointed past the end do
+    we clamp to the (new) last tab. }
+  if FActiveIndex > AIndex then Dec(FActiveIndex)
+  else if FActiveIndex >= FTabs.Count then FActiveIndex := FTabs.Count - 1;
+  if FHoverIndex > AIndex then Dec(FHoverIndex)
+  else if FHoverIndex >= FTabs.Count then FHoverIndex := FTabs.Count - 1;
+  if FHoverClose > AIndex then Dec(FHoverClose)
+  else if FHoverClose >= FTabs.Count then FHoverClose := FTabs.Count - 1;
   Invalidate;
 end;
 

@@ -9,7 +9,7 @@ unit ofd_document;
 interface
 
 uses
-  Classes, SysUtils, Math, Contnrs, Generics.Collections, ofd_package, ofd_types, ofd_xml, ofd_errors, ofd_outline_types, ofd_resources, ofd_cache;
+  Classes, SysUtils, Math, Contnrs, Generics.Collections, SyncObjs, ofd_package, ofd_types, ofd_xml, ofd_errors, ofd_outline_types, ofd_resources, ofd_cache;
 
 type
   TOFDResourceRef = class
@@ -102,6 +102,7 @@ type
     FCguParser: TOFDXMLParser;
     FCguNodeCache: TDictionary<String, TOFDXMLNode>;
     FCguParsed: Boolean;
+    FCguLock: TCriticalSection;
     procedure ParseCompositeGraphicUnitsCache;
      procedure ParseOFDHeader;
     procedure ParseDocumentRoot;
@@ -206,6 +207,7 @@ begin
     FCguNodeCache := TDictionary<String, TOFDXMLNode>.Create;
     FCguParser := nil;
     FCguParsed := False;
+    FCguLock := TCriticalSection.Create;
     FTemplateCache := TTemplateCacheManager.Create;
 FVersion.Major := 0;
     FVersion.Minor := 0;
@@ -232,6 +234,7 @@ begin
     FAnnotationXMLs.Free;
     FCguNodeCache.Free;
     if Assigned(FCguParser) then FCguParser.Free;
+    FCguLock.Free;
     { GAP-19: Free signature stamps }
     if Assigned(FSignatureStamps) then
     begin
@@ -590,11 +593,10 @@ begin
   // 解析公共资源（字体声明、图片索引）
   FResourceManager.ParsePublicResources;
 
-  // 加载所有嵌入字体的 TTF 数据（从 ZIP 读取到内存）
-  FResourceManager.FontList.LoadAllFontData;
-
-  // 解析所有字体的 TTF face name（读取 name 表）
-  FResourceManager.FontList.ResolveAllFaceNames;
+  { 字体 TTF 数据改为惰性加载：TOFDFontResource.FontData getter 在首次读取时
+    触发 TOFDFontList.LoadFontData（见 ofd_resources.pas），Open 阶段不再读
+    取全部字体字节。需要 face name / GDI 注册的调用方（页面视图、渲染 worker、
+    嵌套签章文档）在对应线程上显式调用 LoadAllFontData + ResolveAllFaceNames。 }
 
   // 加载文档共享资源
    FResourceManager.ParseSharedResources;
@@ -662,77 +664,83 @@ var
   CGUnits: TObjectList;
   I: Integer;
 begin
-  if FCguParsed then Exit;
-  FCguParsed := True;
-
-  { Read DocumentRes.xml (or fall back to PublicRes.xml). }
-  XML := '';
-  DocResPath := FDocumentID + '/DocumentRes.xml';
-  if (FDocumentID <> '') and FPackage.HasEntry(DocResPath) then
-  begin
-    try XML := FPackage.ReadAsString(DocResPath); except XML := ''; end;
-  end;
-  if XML = '' then
-  begin
-    try XML := FPackage.ReadAsString('Doc_0/DocumentRes.xml'); except XML := ''; end;
-  end;
-  if XML = '' then
-  begin
-    PubResPath := FDocumentID + '/PublicRes.xml';
-    if (FDocumentID <> '') and FPackage.HasEntry(PubResPath) then
-      try XML := FPackage.ReadAsString(PubResPath); except XML := ''; end;
-    if XML = '' then
-      try XML := FPackage.ReadAsString('Doc_0/PublicRes.xml'); except XML := ''; end;
-  end;
-  if XML = '' then Exit;
-
-  { Keep the parser alive so the cached nodes remain valid for the document's
-    lifetime (freed in Destroy). }
-  FCguParser := TOFDXMLParser.Create;
+  { 惰性初始化会改写共享状态（FCguParsed/FCguParser/FCguNodeCache），加锁串行化 }
+  FCguLock.Enter;
   try
-    FCguParser.LoadFromString(XML);
-    Root := FCguParser.GetRoot;
-    if not Assigned(Root) then Exit;
+    if FCguParsed then Exit;
+    FCguParsed := True;
 
-    { CompositeGraphicUnit entries may be direct children or under a
-      CompositeGraphicUnits container. }
-    CGUnits := Root.FindAllChildren('CompositeGraphicUnit');
-    if CGUnits.Count = 0 then
+    { Read DocumentRes.xml (or fall back to PublicRes.xml). }
+    XML := '';
+    DocResPath := FDocumentID + '/DocumentRes.xml';
+    if (FDocumentID <> '') and FPackage.HasEntry(DocResPath) then
     begin
-      { Free the empty list before trying the wrapped form, otherwise it is
-        leaked when we reassign CGUnits below. }
-      CGUnits.Free;
-      CGUnitsWrap := Root.FindChild('CompositeGraphicUnits');
-      if Assigned(CGUnitsWrap) then
-        CGUnits := CGUnitsWrap.FindAllChildren('CompositeGraphicUnit')
-      else
-        CGUnits := nil;
+      try XML := FPackage.ReadAsString(DocResPath); except XML := ''; end;
     end;
-    if not Assigned(CGUnits) then Exit;
+    if XML = '' then
+    begin
+      try XML := FPackage.ReadAsString('Doc_0/DocumentRes.xml'); except XML := ''; end;
+    end;
+    if XML = '' then
+    begin
+      PubResPath := FDocumentID + '/PublicRes.xml';
+      if (FDocumentID <> '') and FPackage.HasEntry(PubResPath) then
+        try XML := FPackage.ReadAsString(PubResPath); except XML := ''; end;
+      if XML = '' then
+        try XML := FPackage.ReadAsString('Doc_0/PublicRes.xml'); except XML := ''; end;
+    end;
+    if XML = '' then Exit;
 
+    { Keep the parser alive so the cached nodes remain valid for the document's
+      lifetime (freed in Destroy). }
+    FCguParser := TOFDXMLParser.Create;
     try
-      for I := 0 to CGUnits.Count - 1 do
+      FCguParser.LoadFromString(XML);
+      Root := FCguParser.GetRoot;
+      if not Assigned(Root) then Exit;
+
+      { CompositeGraphicUnit entries may be direct children or under a
+        CompositeGraphicUnits container. }
+      CGUnits := Root.FindAllChildren('CompositeGraphicUnit');
+      if CGUnits.Count = 0 then
       begin
-        CGUnit := TOFDXMLNode(CGUnits[I]);
-        if not Assigned(CGUnit) then Continue;
-        ResID := CGUnit.GetAttribute('ID');
-        if ResID = '' then Continue;
-        Content := CGUnit.FindChild('Content');
-        if Assigned(Content) then
-        begin
-          if not FCguNodeCache.ContainsKey(ResID) then
-            FCguNodeCache.Add(ResID, Content);
-        end;
+        { Free the empty list before trying the wrapped form, otherwise it is
+          leaked when we reassign CGUnits below. }
+        CGUnits.Free;
+        CGUnitsWrap := Root.FindChild('CompositeGraphicUnits');
+        if Assigned(CGUnitsWrap) then
+          CGUnits := CGUnitsWrap.FindAllChildren('CompositeGraphicUnit')
+        else
+          CGUnits := nil;
       end;
-    finally
-      CGUnits.Free;
+      if not Assigned(CGUnits) then Exit;
+
+      try
+        for I := 0 to CGUnits.Count - 1 do
+        begin
+          CGUnit := TOFDXMLNode(CGUnits[I]);
+          if not Assigned(CGUnit) then Continue;
+          ResID := CGUnit.GetAttribute('ID');
+          if ResID = '' then Continue;
+          Content := CGUnit.FindChild('Content');
+          if Assigned(Content) then
+          begin
+            if not FCguNodeCache.ContainsKey(ResID) then
+              FCguNodeCache.Add(ResID, Content);
+          end;
+        end;
+      finally
+        CGUnits.Free;
+      end;
+    except
+      { The cached Content nodes reference FCguParser's tree, so clear them
+        before freeing the parser to avoid leaving dangling pointers. }
+      FCguNodeCache.Clear;
+      FCguParser.Free;
+      FCguParser := nil;
     end;
-  except
-    { The cached Content nodes reference FCguParser's tree, so clear them
-      before freeing the parser to avoid leaving dangling pointers. }
-    FCguNodeCache.Clear;
-    FCguParser.Free;
-    FCguParser := nil;
+  finally
+    FCguLock.Leave;
   end;
 end;
 
@@ -1275,7 +1283,13 @@ begin
   if ASealPath = '' then Exit;
   if not Assigned(FPackage) then Exit;
   if not FPackage.HasEntry(ASealPath) then Exit;
-  Raw := FPackage.ReadAsBytes(ASealPath);
+  { Read through the resource manager's raw-media cache when available: the
+    same SES/PNG is re-read from the ZIP on every page compile otherwise.
+    Package content is immutable after Open, so a cached read is equivalent. }
+  if Assigned(FResourceManager) then
+    Raw := FResourceManager.GetOrLoadRawMediaBytes(ASealPath)
+  else
+    Raw := FPackage.ReadAsBytes(ASealPath);
   { The seal resource is either a raw image, or a SES (.esl / SignedValue.dat)
     container that embeds a PNG or a nested OFD seal. }
   if (Length(Raw) >= 8) and (Raw[0] = $89) and (Raw[1] = $50) and (Raw[2] = $4E) and
@@ -1474,7 +1488,11 @@ begin
         if not ReadPhysicalBoxFromContent(BaseLoc, PageWidth, PageHeight) then
         begin
           { Some layouts keep the area only on the referenced template. }
-          TemplatePageNode := CommonDataNode.FindChild('TemplatePage');
+          { CommonData 可能不存在，需要判空 }
+          if Assigned(CommonDataNode) then
+            TemplatePageNode := CommonDataNode.FindChild('TemplatePage')
+          else
+            TemplatePageNode := nil;
           if Assigned(TemplatePageNode) then
           begin
             TemplateBase := TemplatePageNode.GetAttribute('BaseLoc');

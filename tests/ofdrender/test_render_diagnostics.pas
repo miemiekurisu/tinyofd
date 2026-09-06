@@ -38,6 +38,7 @@ type
     procedure TestDiagLogger_WarningCount;
     procedure TestDiagLogger_DumpToStream;
     procedure TestDiagLogger_DumpToStream_Empty;
+    procedure TestDiagLogger_DumpToStream_UTF8Bytes;
     procedure TestDiagLogger_DisplayListSummary_Empty;
   end;
 
@@ -436,6 +437,39 @@ begin
     try
       Logger.DumpToStream(Stream);
       { Empty logger should produce minimal or empty output }
+    finally
+      Stream.Free;
+    end;
+  finally
+    Logger.Free;
+  end;
+end;
+
+procedure TTestRenderDiagnostics.TestDiagLogger_DumpToStream_UTF8Bytes;
+var
+  Logger: TOFDDiagLogger;
+  Stream: TMemoryStream;
+  B: TBytes;
+  Line: UnicodeString;
+begin
+  { Regression: DumpToStream used to write Length(Line) bytes of a UTF-16
+    string - only half of the real payload. The stream must carry complete
+    UTF-8 bytes that decode back to the log line. }
+  Logger := TOFDDiagLogger.Create;
+  try
+    Logger.Enable;
+    Logger.AddError(0, 'obj1', 'TextObject', 'font1', 65, 'lcl', 'ERR', 'Error');
+    Stream := TMemoryStream.Create;
+    try
+      Logger.DumpToStream(Stream);
+      CheckTrue(Stream.Size > 0, 'DumpToStream produces output');
+      SetLength(B, Stream.Size);
+      if Stream.Size > 0 then
+        Move(PByte(Stream.Memory)^, B[0], Stream.Size);
+      Line := TEncoding.UTF8.GetString(B);
+      CheckTrue(Pos('ERROR', Line) > 0, 'UTF-8 payload contains severity');
+      CheckTrue(Pos('Error', Line) > 0, 'UTF-8 payload contains message');
+      CheckEquals(Line[Length(Line)], #10, 'Payload ends with LF');
     finally
       Stream.Free;
     end;

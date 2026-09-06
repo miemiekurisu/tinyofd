@@ -24,6 +24,8 @@ type
     procedure TestDeltaExpansion;
     procedure TestCGTransformMapping;
     procedure TestCGTransformOutOfRangeGlyphClamp;
+    procedure TestSurrogatePairCombinesToOnePlacement;
+    procedure TestLoneSurrogateStaysSeparatePlacement;
   end;
 
 implementation
@@ -136,6 +138,78 @@ begin
       CheckEquals(13.92, GRun.Glyphs[2].Y);
       Check(not ((GRun.Glyphs[2].X = 0) and (GRun.Glyphs[2].Y = 0)),
         'Out-of-range glyph must not fall to X/Y=0,0');
+    finally
+      GRun.Free;
+    end;
+  finally
+    TextObj.Free;
+  end;
+end;
+
+{ Regression: an astral-plane character (e.g. U+1D11E 𝄞) arrives as a UTF-16
+  surrogate pair. It must compile to ONE placement carrying the full scalar
+  value, not two lone-surrogate placements which the cmap maps to .notdef
+  (rendering blank). UnicodeText must still keep both halves for copy/search. }
+procedure TTestTextRunCompiler.TestSurrogatePairCombinesToOnePlacement;
+var
+  TextObj: TOFDTextObject;
+  Code: TOFDTextCode;
+  GRun: TOFDGlyphRun;
+  S: UnicodeString;
+begin
+  { A + U+1D11E (as an explicit surrogate pair) + B. Built by direct element
+    assignment so the string is identical regardless of the active codepage
+    (a WideChar-to-AnsiString conversion in the default console codepage
+    would mangle the surrogates). }
+  SetLength(S, 4);
+  S[1] := WideChar(65);
+  S[2] := WideChar($D834);
+  S[3] := WideChar($DD1E);
+  S[4] := WideChar(66);
+  TextObj := TOFDTextObject.Create('regr_surrogate');
+  try
+    Code := TOFDTextCode.Create(S, 0, 13.92, 0, 0);
+    Code.SetXValue(0);
+    Code.SetYValue(13.92);
+    TextObj.AddTextCode(Code);
+
+    GRun := FCompiler.CompileTextObject(TextObj);
+    try
+      CheckEquals(3, GRun.GlyphCount, 'Surrogate pair must yield ONE placement (A + pair + B)');
+      CheckEquals(Ord('A'), GRun.Glyphs[0].GlyphID, 'First placement is A');
+      CheckEquals($1D11E, GRun.Glyphs[1].GlyphID, 'Second placement carries the combined scalar');
+      CheckEquals(Ord('B'), GRun.Glyphs[2].GlyphID, 'Third placement is B');
+      CheckEquals(4, Length(GRun.UnicodeText), 'UnicodeText keeps all 4 UTF-16 units');
+      CheckEquals($D834, Ord(GRun.UnicodeText[2]), 'UnicodeText keeps the high surrogate');
+      CheckEquals($DD1E, Ord(GRun.UnicodeText[3]), 'UnicodeText keeps the low surrogate');
+    finally
+      GRun.Free;
+    end;
+  finally
+    TextObj.Free;
+  end;
+end;
+
+procedure TTestTextRunCompiler.TestLoneSurrogateStaysSeparatePlacement;
+var
+  TextObj: TOFDTextObject;
+  Code: TOFDTextCode;
+  GRun: TOFDGlyphRun;
+  S: UnicodeString;
+begin
+  { Degenerate input: a lone high surrogate without a low half must still
+    produce one placement (passed through as-is, mapped to .notdef later). }
+  S := #$D834;
+  TextObj := TOFDTextObject.Create('regr_lone_surrogate');
+  try
+    Code := TOFDTextCode.Create(S, 0, 13.92, 0, 0);
+    Code.SetXValue(0);
+    Code.SetYValue(13.92);
+    TextObj.AddTextCode(Code);
+
+    GRun := FCompiler.CompileTextObject(TextObj);
+    try
+      CheckEquals(1, GRun.GlyphCount, 'Lone surrogate still emits one placement');
     finally
       GRun.Free;
     end;

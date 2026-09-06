@@ -119,8 +119,11 @@ begin
       Break;
     if (CM.platform_id = 0) and (CM.encoding_id = 3) then
       Break;
+    { No Unicode match yet: do not fall through with the last arbitrary
+      charmap selected. Callers must fall back to OFD-provided glyph indices. }
+    CM := nil;
   end;
-  if FT_Set_Charmap(AFace, CM) = 0 then
+  if (CM <> nil) and (FT_Set_Charmap(AFace, CM) = 0) then
     Result := True;
 end;
 

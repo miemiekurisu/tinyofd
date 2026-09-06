@@ -6,8 +6,8 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, StdCtrls, Dialogs, ExtCtrls, Menus,
-  ComCtrls, Buttons, Graphics, LCLType, LCLIntf, INIFiles, Clipbrd, FileUtil,
-  Contnrs,
+  ComCtrls, Buttons, Graphics, Types, LCLType, LCLIntf, INIFiles, Clipbrd,
+  FileUtil, Contnrs,
   fpimage, Messages, Printers, LazLogger,
   ofdcore, ofd_document, ofd_page_view, ofd_thumbnail_view,
   ofd_find_bar, ofd_document_view, ofd_text_search, ofd_config,
@@ -133,6 +133,7 @@ type
     FFindBarVisible: Boolean;
     FFindMatches: Integer;
     FFindCurrentMatch: Integer;
+    FFindTimer: TTimer;   { debounce for per-keystroke find (avoid full-document search per key) }
     FFileName: String;
     FFindText: String;
     FInitialized: Boolean;
@@ -180,6 +181,8 @@ type
     procedure TabStripClose(Sender: TObject; AIndex: Integer);
     procedure TabStripContextPopup(Sender: TObject;
       MousePos: TPoint; var Handled: Boolean);
+    procedure TabPopupClose(Sender: TObject);
+    procedure FreeTabPopup(Data: PtrInt);
 
     // Actions
     procedure DoToggleFullscreen;
@@ -288,6 +291,7 @@ type
     procedure FindBarNextClick(Sender: TObject);
     procedure FindBarCloseClick(Sender: TObject);
     procedure FindEditChange(Sender: TObject);
+    procedure FindEditDebounce(Sender: TObject);
     procedure ToolbarOpenClick(Sender: TObject);
     procedure ToolbarPrevClick(Sender: TObject);
     procedure ToolbarNextClick(Sender: TObject);
@@ -1734,6 +1738,13 @@ begin
   FFindEdit.OnChange := @FindEditChange;
   FFindEdit.OnKeyDown := @FormKeyDown;
 
+  { Debounce full-document text search: DoFind sweeps every page, so running
+    it per keystroke freezes the UI while typing. Restart on each change. }
+  FFindTimer := TTimer.Create(Self);
+  FFindTimer.Interval := 200;
+  FFindTimer.Enabled := False;
+  FFindTimer.OnTimer := @FindEditDebounce;
+
   FFindPrevBtn := TSpeedButton.Create(FFindBar);
   FFindPrevBtn.Parent := FFindBar;
   FFindPrevBtn.Left := 190;
@@ -1952,8 +1963,11 @@ begin
       FThumbsBtnsList.Add(Btn);
     end;
   finally
-    FPageView.ZoomMode := OldZoomMode;
+    { Restore zoom BEFORE mode: View.SetZoom pins the view to zmCustom, so
+      setting the mode first and Zoom second would leave the view stuck in
+      zmCustom instead of the restored fit mode. }
     FPageView.Zoom := OldZoom;
+    FPageView.ZoomMode := OldZoomMode;
     FPageView.PageIndex := FCurrentPage;
   end;
 end;
@@ -1995,6 +2009,8 @@ end;
 procedure TViewerMainForm.LoadSettings;
 var
   IIni: TIniFile;
+  R: TRect;
+  AreaW, AreaH: Integer;
 begin
   IIni := TIniFile.Create(ChangeFileExt(Application.ExeName, '.ini'));
   try
@@ -2004,11 +2020,26 @@ begin
       Height := IIni.ReadInteger('Window', 'Height', Height);
       Left := IIni.ReadInteger('Window', 'Left', Left);
       Top := IIni.ReadInteger('Window', 'Top', Top);
- FZoomLevel := IIni.ReadFloat('View', 'Zoom', 1.0);
+  FZoomLevel := IIni.ReadFloat('View', 'Zoom', 1.0);
   FRotationAngle := IIni.ReadInteger('View', 'Rotation', 0);
   FShowThumbs := IIni.ReadBool('View', 'ShowThumbs', False);
       FToolbarVisible := IIni.ReadBool('View', 'ShowToolbar', True);
       FContinuous := IIni.ReadBool('View', 'Continuous', True);
+
+      { Clamp restored geometry into the current work area so a stale ini
+        (monitor unplugged / docked elsewhere) cannot leave the window
+        completely offscreen. }
+      R := Screen.WorkAreaRect;
+      AreaW := R.Right - R.Left;
+      AreaH := R.Bottom - R.Top;
+      if AreaW < 160 then AreaW := 160;
+      if AreaH < 120 then AreaH := 120;
+      if Width > AreaW then Width := AreaW;
+      if Height > AreaH then Height := AreaH;
+      if Left < R.Left then Left := R.Left;
+      if Top < R.Top then Top := R.Top;
+      if Left + Width > R.Left + AreaW then Left := R.Left + AreaW - Width;
+      if Top + Height > R.Top + AreaH then Top := R.Top + AreaH - Height;
     end;
   finally
     IIni.Free;
@@ -2106,6 +2137,7 @@ procedure TViewerMainForm.DoSaveAs;
 var
   PageBmp: TBitmap;
   SavePath: String;
+  Png: TPortableNetworkGraphic;
 begin
   if not Assigned(FDocument) then Exit;
   FSaveDialog.InitialDir := ExtractFilePath(FFileName);
@@ -2115,7 +2147,20 @@ begin
  PageBmp := FPageView.RenderPageToBitmap;
   if not Assigned(PageBmp) then Exit;
   try
-    PageBmp.SaveToFile(SavePath);
+    { The dialog offers PNG and BMP; TBitmap.SaveToFile always writes BMP
+      regardless of the extension, so encode PNG explicitly. }
+    if CompareText(ExtractFileExt(SavePath), '.png') = 0 then
+    begin
+      Png := TPortableNetworkGraphic.Create;
+      try
+        Png.Assign(PageBmp);
+        Png.SaveToFile(SavePath);
+      finally
+        Png.Free;
+      end;
+    end
+    else
+      PageBmp.SaveToFile(SavePath);
     FStatusBar.SimpleText := Format('已导出: %s', [SavePath]);
   except
     on E: Exception do
@@ -2276,6 +2321,10 @@ begin
   FPageView.Visible := True;
   FDocView.Visible := False;
   FDocView.ViewMode := vmSinglePage;
+  { Sync the page view with the page the continuous view was showing
+    (wheel scrolling / find updated only FCurrentPage, not PageIndex). }
+  if (FCurrentPage >= 0) and (FCurrentPage < FDocument.PageCount) then
+    FPageView.PageIndex := FCurrentPage;
   FPageView.ZoomMode := zmFitPage;
   FPageView.ApplyZoomMode;
   FZoomLevel := FPageView.CurrentZoom;
@@ -2647,23 +2696,37 @@ begin
   if (TabIdx < 0) or (TabIdx >= FTabList.Count) then Exit;
   Handled := True;
   Tab := TOFDViewerTab(FTabList[TabIdx]);
-  M := TPopupMenu.Create(Self);
-  try
-    CloseItem := TMenuItem.Create(M);
-    CloseItem.Caption := '关闭标签(&C)';
-    CloseItem.OnClick := @MenuFileCloseClick;
-    M.Items.Add(CloseItem);
-    CloseOthers := TMenuItem.Create(M);
-    CloseOthers.Caption := '关闭其他标签';
-    CloseOthers.OnClick := @MenuFileCloseOthersClick;
-    M.Items.Add(CloseOthers);
-    { Select the right-clicked tab first, then pop up. }
-    if Tab <> FActiveTab then
-      ActivateTab(Tab);
-    M.PopUp;
-  finally
-    M.Free;
-  end;
+  { PopUp returns immediately while the menu stays on screen, so the menu must
+    NOT be freed in this function. It is freed via QueueAsyncCall from
+    OnClose, which fires after the menu is dismissed (deferred from the
+    OnClose event so the pending item OnClick is not swallowed). }
+  M := TPopupMenu.Create(nil);
+  CloseItem := TMenuItem.Create(M);
+  CloseItem.Caption := '关闭标签(&C)';
+  CloseItem.OnClick := @MenuFileCloseClick;
+  M.Items.Add(CloseItem);
+  CloseOthers := TMenuItem.Create(M);
+  CloseOthers.Caption := '关闭其他标签';
+  CloseOthers.OnClick := @MenuFileCloseOthersClick;
+  M.Items.Add(CloseOthers);
+  M.OnClose := @TabPopupClose;
+  { Select the right-clicked tab first, then pop up. }
+  if Tab <> FActiveTab then
+    ActivateTab(Tab);
+  M.PopUp;
+end;
+
+procedure TViewerMainForm.TabPopupClose(Sender: TObject);
+begin
+  { Deferred free: QueueAsyncCall runs after the menu event loop finished, so
+    item OnClick handlers are still delivered. }
+  Application.QueueAsyncCall(@FreeTabPopup, PtrInt(Sender));
+end;
+
+procedure TViewerMainForm.FreeTabPopup(Data: PtrInt);
+begin
+  if Assigned(TObject(Data)) then
+    TObject(Data).Free;
 end;
 
 procedure TViewerMainForm.ActivateTab(ATab: TOFDViewerTab);
@@ -3194,6 +3257,15 @@ end;
 procedure TViewerMainForm.FindEditChange(Sender: TObject);
 begin
   FFindText := FFindEdit.Text;
+  { Debounced: restart the 200ms window so a burst of keystrokes triggers only
+    one full-document search. }
+  FFindTimer.Enabled := False;
+  FFindTimer.Enabled := True;
+end;
+
+procedure TViewerMainForm.FindEditDebounce(Sender: TObject);
+begin
+  FFindTimer.Enabled := False;
   DoFind;
 end;
 

@@ -8,7 +8,7 @@ unit ofd_render_diagnostics;
 interface
 
 uses
-  Classes, SysUtils, Contnrs, Generics.Collections, ofd_types;
+  Classes, SysUtils, SyncObjs, Contnrs, Generics.Collections, ofd_types;
 
 type
   TOFDDiagSeverity = (dsError, dsWarning, dsInfo);
@@ -39,7 +39,11 @@ type
     FRecords: TObjectList;
     FStream: TStream;
     FEnabled: Boolean;
+    { Guards FRecords/FStream/FEnabled: the global logger (GlobalDiagLogger)
+      is used from the render worker thread and UI threads concurrently. }
+    FLock: TCriticalSection;
     procedure InternalAdd(const ARec: TOFDDiagRecord);
+    procedure DumpToStreamLocked(AStr: TStream);
   public
     constructor Create;
     destructor Destroy; override;
@@ -142,30 +146,50 @@ begin
   FRecords := TObjectList.Create(True);
   FStream := nil;
   FEnabled := False;
+  FLock := TCriticalSection.Create;
 end;
 
 destructor TOFDDiagLogger.Destroy;
 begin
   if Assigned(FStream) then FStream.Free;
   FRecords.Free;
+  FreeAndNil(FLock);
   inherited Destroy;
 end;
 
 procedure TOFDDiagLogger.Enable;
 begin
-  FEnabled := True;
+  FLock.Enter;
+  try
+    FEnabled := True;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.Disable;
 begin
-  FEnabled := False;
+  FLock.Enter;
+  try
+    FEnabled := False;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.SetOutput(const AFileName: String);
+var
+  NewStream: TStream;
 begin
-  if Assigned(FStream) then FStream.Free;
-  FStream := TFileStream.Create(AFileName, fmCreate or fmOpenWrite);
-  FEnabled := True;
+  NewStream := TFileStream.Create(AFileName, fmCreate or fmOpenWrite);
+  FLock.Enter;
+  try
+    if Assigned(FStream) then FStream.Free;
+    FStream := NewStream;
+    FEnabled := True;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.GetOutput(const AFileName: String): TMemoryStream;
@@ -173,26 +197,32 @@ var
   MS: TMemoryStream;
 begin
   MS := TMemoryStream.Create;
-  DumpToStream(MS);
+  FLock.Enter;
+  try
+    DumpToStreamLocked(MS);
+  finally
+    FLock.Leave;
+  end;
   Result := MS;
 end;
 
 procedure TOFDDiagLogger.InternalAdd(const ARec: TOFDDiagRecord);
 var
-  Line: String;
+  Line: UTF8String;
 begin
-  if not FEnabled then Exit;
+  { Called with FLock held and FEnabled already checked. }
   FRecords.Add(ARec);
   if Assigned(FStream) then
   begin
-    Line := ARec.ToJSON + #13#10;
+    { Persist as UTF-8: a UTF-16 Length(Line) would truncate the bytes. }
+    Line := UTF8Encode(ARec.ToJSON + #13#10);
     FStream.WriteBuffer(Line[1], Length(Line));
   end;
 end;
 
 procedure TOFDDiagLogger.AddError(APageIndex: Integer; const AObjectID, AObjectType: String;
   const AFontID: String; AGlyphID: Integer;
-  const ABackend, AErrorCode, AMessage: String);
+    const ABackend, AErrorCode, AMessage: String);
 var
   Rec: TOFDDiagRecord;
 begin
@@ -206,12 +236,18 @@ begin
   Rec.ErrorCode := AErrorCode;
   Rec.Severity := dsError;
   Rec.Message := AMessage;
-  InternalAdd(Rec);
+  FLock.Enter;
+  try
+    { Defense in depth: InternalAdd owns (frees) ARec when disabled. }
+    if FEnabled then InternalAdd(Rec) else Rec.Free;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.AddWarning(APageIndex: Integer; const AObjectID, AObjectType: String;
   const AFontID: String; AGlyphID: Integer;
-  const ABackend, AMessage: String);
+    const ABackend, AMessage: String);
 var
   Rec: TOFDDiagRecord;
 begin
@@ -224,11 +260,16 @@ begin
   Rec.Backend := ABackend;
   Rec.Severity := dsWarning;
   Rec.Message := AMessage;
-  InternalAdd(Rec);
+  FLock.Enter;
+  try
+    if FEnabled then InternalAdd(Rec) else Rec.Free;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.AddInfo(APageIndex: Integer; const AObjectID, AObjectType: String;
-  const AMessage: String);
+    const AMessage: String);
 var
   Rec: TOFDDiagRecord;
 begin
@@ -238,7 +279,12 @@ begin
   Rec.ObjectType := AObjectType;
   Rec.Severity := dsInfo;
   Rec.Message := AMessage;
-  InternalAdd(Rec);
+  FLock.Enter;
+  try
+    if FEnabled then InternalAdd(Rec) else Rec.Free;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.RecordGlyphError(APageIndex: Integer; const AObjectID, AFontID: String;
@@ -261,15 +307,25 @@ end;
 
 function TOFDDiagLogger.Count: Integer;
 begin
-  Result := FRecords.Count;
+  FLock.Enter;
+  try
+    Result := FRecords.Count;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.GetRecord(Index: Integer): TOFDDiagRecord;
 begin
-  if (Index >= 0) and (Index < FRecords.Count) then
-    Result := TOFDDiagRecord(FRecords[Index])
-  else
-    Result := nil;
+  FLock.Enter;
+  try
+    if (Index >= 0) and (Index < FRecords.Count) then
+      Result := TOFDDiagRecord(FRecords[Index])
+    else
+      Result := nil;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.ErrorCount: Integer;
@@ -277,9 +333,14 @@ var
   I: Integer;
 begin
   Result := 0;
-  for I := 0 to FRecords.Count - 1 do
-    if TOFDDiagRecord(FRecords[I]).Severity = dsError then
-      Inc(Result);
+  FLock.Enter;
+  try
+    for I := 0 to FRecords.Count - 1 do
+      if TOFDDiagRecord(FRecords[I]).Severity = dsError then
+        Inc(Result);
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.WarningCount: Integer;
@@ -287,35 +348,61 @@ var
   I: Integer;
 begin
   Result := 0;
-  for I := 0 to FRecords.Count - 1 do
-    if TOFDDiagRecord(FRecords[I]).Severity = dsWarning then
-      Inc(Result);
+  FLock.Enter;
+  try
+    for I := 0 to FRecords.Count - 1 do
+      if TOFDDiagRecord(FRecords[I]).Severity = dsWarning then
+        Inc(Result);
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.IsEnabled: Boolean;
 begin
-  Result := FEnabled;
+  FLock.Enter;
+  try
+    Result := FEnabled;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TOFDDiagLogger.Clear;
 begin
-  FRecords.Clear;
-  if Assigned(FStream) then
+  FLock.Enter;
+  try
+    FRecords.Clear;
+    if Assigned(FStream) then
+    begin
+      FStream.Free;
+      FStream := nil;
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TOFDDiagLogger.DumpToStreamLocked(AStr: TStream);
+var
+  I: Integer;
+  Line: UTF8String;
+begin
+  for I := 0 to FRecords.Count - 1 do
   begin
-    FStream.Free;
-    FStream := nil;
+    { UTF-8: a UTF-16 Length(Line) would truncate the bytes. }
+    Line := UTF8Encode(TOFDDiagRecord(FRecords[I]).ToLogString + #13#10);
+    AStr.WriteBuffer(Line[1], Length(Line));
   end;
 end;
 
 procedure TOFDDiagLogger.DumpToStream(AStr: TStream);
-var
-  I: Integer;
-  Line: String;
 begin
-  for I := 0 to FRecords.Count - 1 do
-  begin
-    Line := TOFDDiagRecord(FRecords[I]).ToLogString + #13#10;
-    AStr.WriteBuffer(Line[1], Length(Line));
+  FLock.Enter;
+  try
+    DumpToStreamLocked(AStr);
+  finally
+    FLock.Leave;
   end;
 end;
 
@@ -323,8 +410,13 @@ procedure TOFDDiagLogger.DumpToLog;
 var
   I: Integer;
 begin
-  for I := 0 to FRecords.Count - 1 do
-    WriteLn('[DIAG] ', TOFDDiagRecord(FRecords[I]).ToLogString);
+  FLock.Enter;
+  try
+    for I := 0 to FRecords.Count - 1 do
+      WriteLn('[DIAG] ', TOFDDiagRecord(FRecords[I]).ToLogString);
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TOFDDiagLogger.DisplayListSummary(const AJSON: String): String;

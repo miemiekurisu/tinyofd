@@ -9,6 +9,17 @@ uses
 type
   TOFDResourceType = (rdtImage, rdtFont, rdtSeal, rdtShape, rdtOther);
 
+  TOFDFontList = class;
+
+  { Entry of the raw-media byte cache: the (never-re-read) package stream of
+    one resolved internal path. }
+  TOFDRawMediaCacheEntry = class
+  public
+    Path: String;
+    Data: TBytes;
+    LastAccess: TDateTime;
+  end;
+
   TOFDResource = class
   private
     FResourceID: String;
@@ -36,13 +47,20 @@ type
     FTTFFaceName: String;
     FFontData: TBytes;
     FDataLoaded: Boolean;
+    { Owning TOFDFontList used for the lazy FontData load; nil for standalone
+      (test-constructed) resources, which behave as before. }
+    FOwner: TOFDFontList;
+    function GetFontData: TBytes;
+    procedure SetFontData(const AValue: TBytes);
   public
     constructor Create(const AID, AName, APath: String);
     property ResourceID: String read FResourceID;
     property FontName: String read FFontName;
     property FilePath: String read FFilePath;
     property TTFFaceName: String read FTTFFaceName write FTTFFaceName;
-    property FontData: TBytes read FFontData write FFontData;
+    { Lazy: the first read triggers LoadFontData on the owning list, so
+      Open does no font I/O and only fonts actually used are loaded. }
+    property FontData: TBytes read GetFontData write SetFontData;
     property DataLoaded: Boolean read FDataLoaded write FDataLoaded;
   end;
 
@@ -71,6 +89,8 @@ type
     destructor Destroy; override;
     procedure Parse(const AResPath: String);
     function FindByID(const AID: String): TOFDFontResource;
+    // 加载单个字体的 TTF 二进制数据（从 ZIP 读取），供惰性 FontData 触发
+    procedure LoadFontData(ARes: TOFDFontResource);
     // 加载所有字体的 TTF 二进制数据（从 ZIP 读取）
     procedure LoadAllFontData;
     // 解析所有字体的 TTF face name（读取 name 表）
@@ -82,40 +102,56 @@ type
   end;
 
  TOFDResourceManager = class
-  private
-    FDocument: Pointer;  // 使用 Pointer 避免循环引用
-    FResources: TObjectList;
-    FFonts: TOFDFontList;
-    FDrawParams: TObjectList;
-    function GetResourceCount: Integer;
-    function FindDrawParamIndex(const AID: String): Integer;
-    { Parse <MultiMedias>/<MultiMedia> image entries from a resource XML and
-      register them. Used for both PublicRes.xml and DocumentRes.xml. }
-    procedure ParseMultiMedias(const AResPath: String);
-    { Build and normalize a package-internal path for a media resource. Handles
-      non-standard producers that emit a leading-slash (package-root-relative)
-      MediaFile or BaseLoc. }
-    function ResolveResourcePath(const AResParentDir, ABaseLoc,
-      AMediaFile: String): String;
-    { Collapse a package path: drop empty/'.' segments, resolve '..', strip
-      redundant separators and leading slashes. }
-    function NormalizePackagePath(const APath: String): String;
-  public
-    constructor Create(ADocument: Pointer);
-    destructor Destroy; override;
-    procedure ParsePublicResources;
-    procedure ParseSharedResources;
-    { GAP-3: Parse DrawParam elements from resource XML }
-    procedure ParseDrawParams(const AResPath: String);
-    function FindDrawParam(const AID: String): TOFDDrawParam;
-    function ResolveDrawParam(const AID: String): TOFDDrawParam;
-    procedure RegisterDrawParam(ADrawParam: TOFDDrawParam);
-    function FindResource(const AID: String): TOFDResource;
-    function FindFontByID(const AID: String): TOFDFontResource;
-    property Resources: TObjectList read FResources;
-    property ResourceCount: Integer read GetResourceCount;
-    property FontList: TOFDFontList read FFonts;
-  end;
+   private
+     FDocument: Pointer;  // 使用 Pointer 避免循环引用
+     FResources: TObjectList;
+     FFonts: TOFDFontList;
+     FDrawParams: TObjectList;
+     { LRU cache of RAW (still-compressed) media bytes keyed by the resolved
+       package internal path. The page compiler re-reads image payloads on
+       every recompile of a page (different width/zoom); the package content
+       is immutable after Open, this cache is owned by the per-document
+       manager, and both callers (UI render + worker render) use their own
+       TOFDDocument instance, so a document-lifetime cache without tombstones
+       is safe. Bounds: entry count + raw-bytes budget (see constants below). }
+     FRawMediaCache: TObjectList; { of TOFDRawMediaCacheEntry, owns entries }
+     function GetResourceCount: Integer;
+     function FindDrawParamIndex(const AID: String): Integer;
+     { Sum of raw bytes currently cached (must be O(n), list <= 32 entries). }
+     function TotalRawMediaBytes: Int64;
+     { Parse <MultiMedias>/<MultiMedia> image entries from a resource XML and
+       register them. Used for both PublicRes.xml and DocumentRes.xml. }
+     procedure ParseMultiMedias(const AResPath: String);
+     { Build and normalize a package-internal path for a media resource. Handles
+       non-standard producers that emit a leading-slash (package-root-relative)
+       MediaFile or BaseLoc. }
+     function ResolveResourcePath(const AResParentDir, ABaseLoc,
+       AMediaFile: String): String;
+     { Collapse a package path: drop empty/'.' segments, resolve '..', strip
+       redundant separators and leading slashes. }
+     function NormalizePackagePath(const APath: String): String;
+   public
+     constructor Create(ADocument: Pointer);
+     destructor Destroy; override;
+     procedure ParsePublicResources;
+     procedure ParseSharedResources;
+     { GAP-3: Parse DrawParam elements from resource XML }
+     procedure ParseDrawParams(const AResPath: String);
+     function FindDrawParam(const AID: String): TOFDDrawParam;
+     function ResolveDrawParam(const AID: String): TOFDDrawParam;
+     procedure RegisterDrawParam(ADrawParam: TOFDDrawParam);
+     function FindResource(const AID: String): TOFDResource;
+     function FindFontByID(const AID: String): TOFDFontResource;
+     { Read the RAW bytes of a package entry, memoized by internal path.
+       Returns an empty array when the entry cannot be read (callers treat
+       that as "image renders empty", same as the previous direct stream read).
+       Invalidation: none needed - the package content never changes after
+       Open and the cache dies with the document. }
+     function GetOrLoadRawMediaBytes(const AInternalPath: String): TBytes;
+     property Resources: TObjectList read FResources;
+     property ResourceCount: Integer read GetResourceCount;
+     property FontList: TOFDFontList read FFonts;
+   end;
 
 function ReadTTFName(const AStream: TStream): String;
 
@@ -123,6 +159,11 @@ implementation
 
 uses
   ofd_document;
+
+const
+  { Entry cap and raw-bytes budget of the manager's raw-media byte cache. }
+  cMaxRawMediaEntries = 32;
+  cMaxRawMediaBytes = 256 * 1024 * 1024;
 
 constructor TOFDResource.Create(const AID: String; const AType: TOFDResourceType;
   const APath, AInternalPath: String);
@@ -142,6 +183,25 @@ begin
   FResourceID := AID;
   FFontName := AName;
   FFilePath := APath;
+end;
+
+function TOFDFontResource.GetFontData: TBytes;
+begin
+  { Lazy load: the first FontData read pulls the bytes from the package.
+    Deliberately no locks here - each TOFDFontList belongs to one TOFDDocument,
+    and every document object is used from a single thread (UI document on the
+    main thread, worker document on its worker thread), so the load trigger
+    races can only happen if callers share a document across threads, which
+    the render pipeline never does. }
+  if not FDataLoaded and (FFilePath <> '') and Assigned(FOwner) then
+    FOwner.LoadFontData(Self);
+  Result := FFontData;
+end;
+
+procedure TOFDFontResource.SetFontData(const AValue: TBytes);
+begin
+  { Plain write: used by LoadFontData and tests to inject data directly. }
+  FFontData := AValue;
 end;
 
 constructor TOFDImageResource.Create(const AID, APath, AMediaType: String);
@@ -273,6 +333,7 @@ begin
           if FindFontIndex(FontID) < 0 then
           begin
             Font := TOFDFontResource.Create(FontID, FontName, FullPath);
+            Font.FOwner := Self;
             FFonts.AddObject(FontID, Font);
           end;
         end;
@@ -294,37 +355,47 @@ begin
     Result := nil;
 end;
 
-procedure TOFDFontList.LoadAllFontData;
+procedure TOFDFontList.LoadFontData(ARes: TOFDFontResource);
 var
-  I: Integer;
-  FontRes: TOFDFontResource;
   Stream: TStream;
   FontData: TBytes;
 begin
-  for I := 0 to FFonts.Count - 1 do
-  begin
-    FontRes := TOFDFontResource(FFonts.Objects[I]);
-    if not Assigned(FontRes) then Continue;
-    if FontRes.DataLoaded then Continue;
-    if FontRes.FilePath = '' then Continue;
+  if not Assigned(ARes) then Exit;
+  if ARes.DataLoaded then Exit;
+  if ARes.FilePath = '' then Exit;
 
-    Stream := nil;
-    try
-      if FPackage.HasEntry(FontRes.FilePath) then
-        Stream := FPackage.OpenStream(FontRes.FilePath);
-      if not Assigned(Stream) then Continue;
-      Stream.Position := 0;
-      if Stream.Size <= 0 then Continue;
-
-      SetLength(FontData, Stream.Size);
-      Stream.ReadBuffer(FontData[0], Stream.Size);
-      FontRes.FontData := FontData;
-      FontRes.DataLoaded := True;
-    except
-      FontData := nil;
+  Stream := nil;
+  try
+    if FPackage.HasEntry(ARes.FilePath) then
+      Stream := FPackage.OpenStream(ARes.FilePath);
+    if not Assigned(Stream) then Exit;
+    Stream.Position := 0;
+    if Stream.Size <= 0 then
+    begin
+      { Continue 会跳过 try 块后的 FreeAndNil，必须先释放，
+        否则文件流泄漏（Windows 下文件被持续占用） }
+      FreeAndNil(Stream);
+      Exit;
     end;
-    FreeAndNil(Stream);
+
+    SetLength(FontData, Stream.Size);
+    Stream.ReadBuffer(FontData[0], Stream.Size);
+    { Write the field directly: going through the FontData property setter is
+      fine, but reading the property here would re-enter the lazy trigger. }
+    ARes.FFontData := FontData;
+    ARes.FDataLoaded := True;
+  except
+    FontData := nil;
   end;
+  FreeAndNil(Stream);
+end;
+
+procedure TOFDFontList.LoadAllFontData;
+var
+  I: Integer;
+begin
+  for I := 0 to FFonts.Count - 1 do
+    LoadFontData(TOFDFontResource(FFonts.Objects[I]));
 end;
 
 procedure TOFDFontList.ResolveAllFaceNames;
@@ -340,7 +411,11 @@ begin
     if not Assigned(FontRes) then Continue;
     if FontRes.TTFFaceName <> '' then Continue;  // 已解析
 
-    FontData := FontRes.FontData;
+    { Read the raw field, NOT the FontData property: the property lazily loads
+      on the owning list, and resolving face names must not itself trigger
+      font I/O for documents that never touch font bytes. Callers that need
+      face names call LoadAllFontData explicitly first (page view, worker). }
+    FontData := FontRes.FFontData;
     if Length(FontData) = 0 then Continue; // 数据未加载
 
     Stream := TMemoryStream.Create;
@@ -436,6 +511,7 @@ begin
 FResources := TObjectList.Create(True);
   FFonts := TOFDFontList.Create(LDoc.DocumentID, LDoc.Package);
   FDrawParams := TObjectList.Create(True);
+  FRawMediaCache := TObjectList.Create(True);
 end;
 
 destructor TOFDResourceManager.Destroy;
@@ -443,6 +519,7 @@ begin
   FFonts.Free;
   FResources.Free;
   FDrawParams.Free;
+  FRawMediaCache.Free;
   inherited Destroy;
 end;
 
@@ -643,6 +720,79 @@ begin
   Result := FFonts.FindByID(AID);
 end;
 
+function TOFDResourceManager.GetOrLoadRawMediaBytes(
+  const AInternalPath: String): TBytes;
+var
+  I: Integer;
+  Entry: TOFDRawMediaCacheEntry;
+  LDoc: TOFDDocument;
+  Data: TBytes;
+  NewBytes: Int64;
+begin
+  SetLength(Result, 0);
+  { LRU hit: move the entry to the end (index 0 is the eviction candidate). }
+  for I := 0 to FRawMediaCache.Count - 1 do
+  begin
+    Entry := TOFDRawMediaCacheEntry(FRawMediaCache[I]);
+    if Entry.Path = AInternalPath then
+    begin
+      Entry.LastAccess := Now;
+      FRawMediaCache.Move(I, FRawMediaCache.Count - 1);
+      Result := Entry.Data;
+      Exit;
+    end;
+  end;
+
+  LDoc := TOFDDocument(FDocument);
+  if not Assigned(LDoc) then Exit;
+  try
+    if not LDoc.Package.HasEntry(AInternalPath) then Exit;
+    Data := LDoc.Package.ReadAsBytes(AInternalPath);
+  except
+    { Same semantics as the previous direct stream read in the page compiler:
+      read failures render the image empty, they are not fatal. }
+    SetLength(Data, 0);
+    Exit;
+  end;
+  NewBytes := Length(Data);
+  if NewBytes = 0 then Exit;
+
+  { Evict LRU-oldest-first entries until both caps (entry count + raw bytes)
+    fit the new payload. A single payload larger than the whole budget would
+    evict everything and still blow the limit; such an entry is not cached
+    (Result is still returned) so re-reads stay cheap-free. }
+  if NewBytes < cMaxRawMediaBytes then
+  begin
+    while FRawMediaCache.Count > 0 do
+    begin
+      if (FRawMediaCache.Count < cMaxRawMediaEntries) and
+         (TotalRawMediaBytes + NewBytes <= cMaxRawMediaBytes) then
+        Break;
+      FRawMediaCache.Delete(0);
+    end;
+    Entry := TOFDRawMediaCacheEntry.Create;
+    try
+      Entry.Path := AInternalPath;
+      Entry.Data := Data;
+      Entry.LastAccess := Now;
+      FRawMediaCache.Add(Entry);
+    except
+      Entry.Free;
+      raise;
+    end;
+  end;
+  Result := Data;
+end;
+
+function TOFDResourceManager.TotalRawMediaBytes: Int64;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to FRawMediaCache.Count - 1 do
+    Result := Result + Length(TOFDRawMediaCacheEntry(FRawMediaCache[I]).Data);
+end;
+
 function TOFDResourceManager.FindDrawParamIndex(const AID: String): Integer;
 var
   I: Integer;
@@ -678,9 +828,12 @@ end;
 
 function TOFDResourceManager.ResolveDrawParam(const AID: String): TOFDDrawParam;
 var
-  DP, Parent: TOFDDrawParam;
+  DP: TOFDDrawParam;
+  Chain: TList;
+  Eff: TOFDDrawParam;
   Visited: TStringList;
   RelID: String;
+  I: Integer;
 begin
   Result := nil;
   if AID = '' then Exit;
@@ -688,24 +841,34 @@ begin
   DP := FindDrawParam(AID);
   if not Assigned(DP) then Exit;
 
-  { Walk the Relative chain and merge parent values into DP }
+  { 先收集整条 Relative 链（child 在前），再把祖先值合入 Eff 快照
+    （_eff_ 只在本地使用），最后一次性合入 child：
+    - MergeFromParent 只复制带 *Set 标记的值，逐级边走边合无法传递
+      祖辈只设过的值，且会污染链中间的缓存 DrawParam；
+    - Eff 自最顶层祖先开始合并，近层祖先覆盖远层，child 自身值最优先。 }
+  Chain := TList.Create;
+  Eff := TOFDDrawParam.Create('');
   Visited := TStringList.Create;
   try
+    Chain.Add(DP);
     Visited.Add(AID);
-    Parent := DP;
-    while Parent.Relative <> '' do
+    while TOFDDrawParam(Chain.Last).Relative <> '' do
     begin
-      RelID := Parent.Relative;
+      RelID := TOFDDrawParam(Chain.Last).Relative;
       if Visited.IndexOf(RelID) >= 0 then Break; { Prevent infinite loop }
       Visited.Add(RelID);
 
       DP := FindDrawParam(RelID);
       if not Assigned(DP) then Break;
-      Parent.MergeFromParent(DP);
-      Parent := DP;
+      Chain.Add(DP);
     end;
+    for I := Chain.Count - 1 downto 1 do
+      Eff.MergeFromParent(TOFDDrawParam(Chain[I]));
+    TOFDDrawParam(Chain[0]).MergeFromParent(Eff);
   finally
+    Eff.Free;
     Visited.Free;
+    Chain.Free;
   end;
   Result := FindDrawParam(AID);
 end;
@@ -973,10 +1136,15 @@ begin
             AStream.Position := TableOffset + StringStorageOffset + OffsetW;
             AStream.ReadBuffer(NameBuf[0], LengthW);
 
+            { Mac platform name records are single-byte (MacRoman/ASCII):
+              每个字节即一个字符，直接逐字节转成 UTF-16 字符。
+              旧实现把 LengthW 个字节 Move 进 LengthW 个 WideChar 中，
+              后半部分是未初始化内存，结果字符串乱码 }
             CharCount := LengthW;
             if CharCount > 127 then CharCount := 127;
             SetLength(Result, CharCount);
-            Move(NameBuf[0], Pointer(Result)^, CharCount);
+            for J := 0 to CharCount - 1 do
+              Result[J + 1] := Chr(NameBuf[J]);
             Exit;
           end;
         end;

@@ -31,7 +31,11 @@ begin
   ViewerConfig.DiagnosticsEnabled := False;
   ViewerConfig.StrictMode := False;
   ViewerConfig.AllowAutoFallback := False;
-  ViewerConfig.CacheDegradedPages := False;
+  { Cache degraded/failed page renders. Default False caused a full re-render
+    on EVERY Paint for pages finishing in rsDegraded/rsFailed (FNeedRedraw
+    stayed True), freezing scrolling on CPU-bound rendering. The cached bitmap
+    still carries the visible error indicator, so caching it is safe. }
+  ViewerConfig.CacheDegradedPages := True;
   ViewerConfig.MaxFullPageZoom := 4.0;
 end;
 

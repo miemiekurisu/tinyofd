@@ -45,6 +45,7 @@ var
     BaseX, BaseY: Double;
   end;
   CharCount, TotalChars, I, J, DxIdx: Integer;
+  SrcLen, DstLen: Integer;
   Code: TOFDTextCode;
   CleanText: UnicodeString;
   DeltaXArr, DeltaYArr: TOFDDoubleArray;
@@ -90,8 +91,22 @@ begin
     Code := ATextObj.TextCodeByIndex[I];
     if Code = nil then Continue;
 
-    CleanText := StringReplace(Code.CharText, #13, '', [rfReplaceAll]);
-    CleanText := StringReplace(CleanText, #10, '', [rfReplaceAll]);
+    { Strip CR/LF with a pre-sized buffer: per-char `+` concatenation is
+      O(n^2) for long TextCode runs. FPC dynamic strings are reference-counted,
+      so SetLength inside the loop would also copy; allocate once, compact, and
+      trim only at the end. Same semantics as before: only #13/#10 removed,
+      surrogate pairs untouched. }
+    SrcLen := Length(Code.CharText);
+    if SrcLen = 0 then Continue;
+    SetLength(CleanText, SrcLen);
+    DstLen := 0;
+    for J := 1 to SrcLen do
+      if (Code.CharText[J] <> #13) and (Code.CharText[J] <> #10) then
+      begin
+        Inc(DstLen);
+        CleanText[DstLen] := Code.CharText[J];
+      end;
+    SetLength(CleanText, DstLen);
     if CleanText = '' then Continue;
 
     if Code.XValid then
@@ -168,16 +183,37 @@ begin
 
   if not HasCG then
   begin
-    { No CGTransforms - use Unicode codepoint as GlyphID, let font cmap resolve it }
-    for I := 0 to TotalChars - 1 do
+    { No CGTransforms - use Unicode codepoint as GlyphID, let font cmap resolve it.
+      Astral-plane characters arrive as UTF-16 surrogate PAIRS; combine each pair
+      into a single scalar value with one placement. Previously each lone
+      surrogate mapped to glyph 0/.notdef and rendered blank. (The CleanText
+      below only strips CR/LF, so pairs are preserved intact entering here.) }
+    I := 0;
+    while I < TotalChars do
     begin
       ClearGlyphPlacement(Placement);
       Placement.KeyKind := gkkUnicodeScalar;
-      Placement.GlyphID := Ord(AllChars[I].Ch);
-      Placement.X := AllChars[I].BaseX;
-      Placement.Y := AllChars[I].BaseY;
       Placement.SourceCodeIndex := I;
-      Result.AddGlyph(Placement);
+      if (Ord(AllChars[I].Ch) >= $D800) and (Ord(AllChars[I].Ch) <= $DBFF) and
+         (I + 1 < TotalChars) and
+         (Ord(AllChars[I + 1].Ch) >= $DC00) and (Ord(AllChars[I + 1].Ch) <= $DFFF) then
+      begin
+        Placement.GlyphID :=
+          ((Ord(AllChars[I].Ch) - $D800) shl 10) +
+          (Ord(AllChars[I + 1].Ch) - $DC00) + $10000;
+        Placement.X := AllChars[I].BaseX;
+        Placement.Y := AllChars[I].BaseY;
+        Result.AddGlyph(Placement);
+        Inc(I, 2);
+      end
+      else
+      begin
+        Placement.GlyphID := Ord(AllChars[I].Ch);
+        Placement.X := AllChars[I].BaseX;
+        Placement.Y := AllChars[I].BaseY;
+        Result.AddGlyph(Placement);
+        Inc(I);
+      end;
     end;
   end
   else

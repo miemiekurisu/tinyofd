@@ -33,6 +33,10 @@ type
     HasClip: Boolean;
     { Phase 6: Path-based clip mask (1=inside, 0=outside) }
     ClipMask: TBytes;
+    { Clip is degenerate/off-page, derived from the clip GEOMETRY at push time
+      (projected bounding box empty on the surface). Such a clip is treated as
+      a no-op instead of hiding its content. }
+    ClipDegenerate: Boolean;
     { Phase 6: Line styling }
     LineCap: TOFDLineCap;
     LineJoin: TOFDLineJoin;
@@ -88,6 +92,11 @@ type
     FFontCache: TObjectList; { list of TOFDFontFaceCacheEntry, LRU }
     FFontCacheKeys: TStringList; { parallel list of font data hashes }
     FMaxFontCacheEntries: Integer;
+    { Content-hash memo per FontID: the font TBytes do not change during the
+      service's (single-document) lifetime, so the full N-byte FNV scan for
+      ComputeFontHash is done once per FontID and reused for every text run. }
+    FFontHashKeys: TStringList; { FontIDs with a memoized content hash }
+    FFontHashValues: TStringList; { parallel memoized hash strings }
     FOutlineCacheKeys: TStringList; { cached flattened glyph outlines, key fontID+glyphIdx }
     FOutlineCache: array of TOFDPathCommands;
     FOutlineCacheNum: Integer;
@@ -97,6 +106,7 @@ type
     FImageCache: TObjectList; { list of TOFDSurface, LRU }
     FImageCacheKeys: TStringList; { parallel list of image data hashes }
     FMaxImageCacheEntries: Integer;
+    FImageCacheBytes: Int64; { estimated memory of cached surfaces (W*H*4) }
     FSealSurfaces: TObjectList; { pre-rendered nested OFD seal surfaces, in
       display-list order; consumed by RenderSeal to avoid re-entering the
       render pipeline mid-render }
@@ -137,8 +147,17 @@ type
       B, G, R, A: Byte);
     function ComputeFontHash(const AData: TBytes): String;
     function ComputeImageHash(const AData: TBytes): String;
-    function GetCachedImage(const AData: TBytes): TOFDSurface;
-    procedure CacheImage(const AData: TBytes; ASurface: TOFDSurface);
+    { Memoized ComputeFontHash keyed by the (single-document-lifetime) FontID:
+      the provider hands us the same TBytes content for the same ID, so the
+      hash is computed at most once per ID. No invalidation needed: the
+      provider is bound to one document and font TBytes are immutable once
+      loaded from the (read-only) package. }
+    function MemoizedFontHash(const AFontID: String; const AData: TBytes): String;
+    { Key for the decoded-image cache: a stable identity string when the
+      producer knows one (CacheKey), else the content hash of the bytes. }
+    function ImageCacheKey(const AData: TBytes; const ACacheKey: String): String;
+    function GetCachedImage(const AData: TBytes; const ACacheKey: String): TOFDSurface;
+    procedure CacheImage(const AData: TBytes; const ACacheKey: String; ASurface: TOFDSurface);
     function GetLogDir: String;
     procedure EvictFontCache;
   public
@@ -161,31 +180,60 @@ type
 
 implementation
 
-{ DIAG: log clip temp content (non-zero alpha count). }
-{ Return True if a clip mask has (almost) no opaque pixels — meaning the clip
-  region is degenerate/off-page. Treating such a clip as a no-op avoids hiding
-  the object (or, previously, wiping the whole page). }
-function IsClipMaskEmpty(const Mask: TBytes): Boolean;
+const
+  { Byte budget for the decoded-image surface cache (32bpp estimate, W*H*4).
+    The count cap (FMaxImageCacheEntries) alone lets 64 fully-decoded images
+    stay resident; this budget additionally evicts LRU-oldest-first until the
+    stored bytes fit, so pages with many large images stay bounded. }
+  cMaxImageCacheBytes = 128 * 1024 * 1024;
+
+{ Process-wide sequence number making nested-seal temp file names unique even
+  when two threads render seals within the same GetTickCount64 tick. }
 var
-  I, NonZero, Len: Integer;
+  SealTempSeq: Integer = 0;
+
+{ DIAG: decide from the clip GEOMETRY (not the mask) whether a clip region is
+  degenerate: its projected bounding box (under the current transform) intersects
+  the surface in (almost) no area. Such a clip is off-page/degenerate and treated
+  as a no-op so it does not hide the object. Previously the decision scanned the
+  mask for opaque pixels and treated any clip covering <1% of the surface as
+  empty, which made real small clips pass UNCLIPPED content through. }
+function IsClipBoundsEmpty(const APath: TOFDPathCommands;
+  const ATransform: TOFDMatrix; ASurfaceW, ASurfaceH: Integer): Boolean;
+var
+  MinX, MinY, MaxX, MaxY: Double;
+  P0X, P0Y, P1X, P1Y: Double;
 begin
   Result := True;
-  Len := Length(Mask);
-  if Len = 0 then Exit;
-  { Treat a clip as degenerate if its opaque coverage is < 1% of the surface.
-    A full-page clip covers ~98%; a small or off-page clip (whose transform
-    landed outside the page) covers <1%. The latter must not hide the object. }
-  NonZero := 0;
-  for I := 0 to Len - 1 do
-    if Mask[I] <> 0 then
-    begin
-      Inc(NonZero);
-      if NonZero >= (Len div 100) then
-      begin
-        Result := False;
-        Exit;
-      end;
-    end;
+  if ASurfaceW <= 0 then Exit;
+  if ASurfaceH <= 0 then Exit;
+  if Length(APath) = 0 then Exit;
+  TOFDCompositor.PathBounds(APath, MinX, MinY, MaxX, MaxY);
+  if (MaxY < MinY) or (MaxX < MinX) then Exit;
+  P0X := ATransform[0, 0] * MinX + ATransform[0, 1] * MinY + ATransform[0, 2];
+  P1X := ATransform[0, 0] * MaxX + ATransform[0, 1] * MaxY + ATransform[0, 2];
+  P0Y := ATransform[1, 0] * MinX + ATransform[1, 1] * MinY + ATransform[1, 2];
+  P1Y := ATransform[1, 0] * MaxX + ATransform[1, 1] * MaxY + ATransform[1, 2];
+  MinX := Min(P0X, P1X); MaxX := Max(P0X, P1X);
+  MinY := Min(P0Y, P1Y); MaxY := Max(P0Y, P1Y);
+  { Entirely off-surface (with a small epsilon) -> degenerate. }
+  if (MaxX < -0.5) or (MaxY < -0.5) or
+     (MinX > ASurfaceW - 0.5) or (MinY > ASurfaceH - 0.5) then Exit;
+  { Both projected dimensions < 1px -> the region cannot rasterize into any
+    opaque pixel; treat as degenerate. A thin-but-long clip (e.g. a 1px line
+    area) is NOT degenerate and must still clip. }
+  if (MaxX - MinX < 1.0) and (MaxY - MinY < 1.0) then Exit;
+  Result := False;
+end;
+
+{ Convert a 0..1 color component to a Byte, clamped. Malformed documents can
+  carry components >1 or <0; unclamped Round() values overflow the Byte in
+  range-checked builds (dropping the whole object) or wrap visibly. }
+function ClampColorComponent255(AValue: Double): Byte;
+begin
+  Result := Round(AValue * 255);
+  if Result > 255 then Result := 255
+  else if Result < 0 then Result := 0;
 end;
 
 const
@@ -235,6 +283,8 @@ begin
     FClipSurfaceStack := TStack.Create;
   FFontCache := TObjectList.Create(True);
   FFontCacheKeys := TStringList.Create;
+  FFontHashKeys := TStringList.Create;
+  FFontHashValues := TStringList.Create;
   FMaxFontCacheEntries := 32;
   FOutlineCacheKeys := TStringList.Create;
   FOutlineCacheNum := 0;
@@ -245,6 +295,7 @@ begin
   FImageCache := TObjectList.Create(True);
   FImageCacheKeys := TStringList.Create;
   FMaxImageCacheEntries := 64;
+  FImageCacheBytes := 0;
   FSealSurfaces := TObjectList.Create(True);
 
   FFontEngine := TOFDFT2FontEngine.Create;
@@ -262,6 +313,8 @@ begin
     which will release the interface references. }
   FFontCache.Free;
   FFontCacheKeys.Free;
+  FFontHashKeys.Free;
+  FFontHashValues.Free;
   FOutlineCacheKeys.Free;
   SetLength(FOutlineCache, 0);
   FGlyphBitmapCache.Free;
@@ -293,6 +346,7 @@ begin
   FState.LineWidth := 1.0;
   FState.FillRule := frNonZero;
   FState.HasClip := False;
+  FState.ClipDegenerate := False;
   FState.ClipMinX := 0;
   FState.ClipMaxX := MaxInt;
   FState.ClipMinY := 0;
@@ -488,12 +542,39 @@ begin
   Result := IntToHex(H, 8) + ':img:' + IntToStr(Length(AData));
 end;
 
-function TOFDRenderService.GetCachedImage(const AData: TBytes): TOFDSurface;
+function TOFDRenderService.MemoizedFontHash(const AFontID: String;
+  const AData: TBytes): String;
+var
+  I: Integer;
+begin
+  I := FFontHashKeys.IndexOf(AFontID);
+  if I >= 0 then
+  begin
+    Result := FFontHashValues[I];
+    Exit;
+  end;
+  Result := ComputeFontHash(AData);
+  FFontHashKeys.Add(AFontID);
+  FFontHashValues.Add(Result);
+end;
+
+function TOFDRenderService.ImageCacheKey(const AData: TBytes;
+  const ACacheKey: String): String;
+begin
+  { Prefixed so an identity key can never collide with a content hash string. }
+  if ACacheKey <> '' then
+    Result := 'id:' + ACacheKey
+  else
+    Result := ComputeImageHash(AData);
+end;
+
+function TOFDRenderService.GetCachedImage(const AData: TBytes;
+  const ACacheKey: String): TOFDSurface;
 var
   Hash: String;
   I: Integer;
 begin
-  Hash := ComputeImageHash(AData);
+  Hash := ImageCacheKey(AData, ACacheKey);
   I := FImageCacheKeys.IndexOf(Hash);
   if I >= 0 then
   begin
@@ -505,21 +586,34 @@ begin
     Result := nil;
 end;
 
-procedure TOFDRenderService.CacheImage(const AData: TBytes; ASurface: TOFDSurface);
+procedure TOFDRenderService.CacheImage(const AData: TBytes;
+  const ACacheKey: String; ASurface: TOFDSurface);
 var
   Hash: String;
+  NewBytes, EvictedBytes: Int64;
 begin
-  { Evict oldest entries down to the limit. Guard against a limit <= 0 (or a
-    zero/negative default) so we never Delete(0) from an empty list, which would
-    raise EListError and silently drop the image. }
-  while (FImageCache.Count > 0) and (FImageCache.Count >= FMaxImageCacheEntries) do
+  { Evict the least-recently-used entries down to BOTH limits (entry count and
+    byte budget). Guard against count <= 0 (or a zero/negative default) so we
+    never Delete(0) from an empty list, which would raise EListError and
+    silently drop the image. }
+
+  NewBytes := OFDBitmapBytes(ASurface.Width, ASurface.Height);
+
+  while (FImageCache.Count > 0) and
+        ((FImageCache.Count >= FMaxImageCacheEntries) or
+         (FImageCacheBytes + NewBytes > cMaxImageCacheBytes)) do
   begin
+    EvictedBytes := OFDBitmapBytes(TOFDSurface(FImageCache[0]).Width,
+      TOFDSurface(FImageCache[0]).Height);
     FImageCache.Delete(0);
     FImageCacheKeys.Delete(0);
+    Dec(FImageCacheBytes, EvictedBytes);
+    if FImageCacheBytes < 0 then FImageCacheBytes := 0;
   end;
-  Hash := ComputeImageHash(AData);
+  Hash := ImageCacheKey(AData, ACacheKey);
   FImageCache.Add(ASurface);
   FImageCacheKeys.Add(Hash);
+  Inc(FImageCacheBytes, NewBytes);
 end;
 
 procedure TOFDRenderService.RenderFillPath(Cmd: TOFDPathCommand);
@@ -533,21 +627,21 @@ begin
   case Cmd.Color.FType of
     cctRGB:
       begin
-        R := Round(Cmd.Color.FValues[0] * 255);
-        G := Round(Cmd.Color.FValues[1] * 255);
-        B := Round(Cmd.Color.FValues[2] * 255);
+        R := ClampColorComponent255(Cmd.Color.FValues[0]);
+        G := ClampColorComponent255(Cmd.Color.FValues[1]);
+        B := ClampColorComponent255(Cmd.Color.FValues[2]);
       end;
     cctGray:
       begin
-        R := Round(Cmd.Color.FValues[0] * 255);
+        R := ClampColorComponent255(Cmd.Color.FValues[0]);
         G := R;
         B := R;
       end;
     cctCMYK:
       begin
-        R := Round((1 - Cmd.Color.FValues[0]) * (1 - Cmd.Color.FValues[3]) * 255);
-        G := Round((1 - Cmd.Color.FValues[1]) * (1 - Cmd.Color.FValues[3]) * 255);
-        B := Round((1 - Cmd.Color.FValues[2]) * (1 - Cmd.Color.FValues[3]) * 255);
+        R := ClampColorComponent255((1 - Cmd.Color.FValues[0]) * (1 - Cmd.Color.FValues[3]));
+        G := ClampColorComponent255((1 - Cmd.Color.FValues[1]) * (1 - Cmd.Color.FValues[3]));
+        B := ClampColorComponent255((1 - Cmd.Color.FValues[2]) * (1 - Cmd.Color.FValues[3]));
       end;
   else
     R := 0;
@@ -579,21 +673,21 @@ begin
   case Cmd.Color.FType of
     cctRGB:
       begin
-        R := Round(Cmd.Color.FValues[0] * 255);
-        G := Round(Cmd.Color.FValues[1] * 255);
-        B := Round(Cmd.Color.FValues[2] * 255);
+        R := ClampColorComponent255(Cmd.Color.FValues[0]);
+        G := ClampColorComponent255(Cmd.Color.FValues[1]);
+        B := ClampColorComponent255(Cmd.Color.FValues[2]);
       end;
     cctGray:
       begin
-        R := Round(Cmd.Color.FValues[0] * 255);
+        R := ClampColorComponent255(Cmd.Color.FValues[0]);
         G := R;
         B := R;
       end;
     cctCMYK:
       begin
-        R := Round((1 - Cmd.Color.FValues[0]) * (1 - Cmd.Color.FValues[3]) * 255);
-        G := Round((1 - Cmd.Color.FValues[1]) * (1 - Cmd.Color.FValues[3]) * 255);
-        B := Round((1 - Cmd.Color.FValues[2]) * (1 - Cmd.Color.FValues[3]) * 255);
+        R := ClampColorComponent255((1 - Cmd.Color.FValues[0]) * (1 - Cmd.Color.FValues[3]));
+        G := ClampColorComponent255((1 - Cmd.Color.FValues[1]) * (1 - Cmd.Color.FValues[3]));
+        B := ClampColorComponent255((1 - Cmd.Color.FValues[2]) * (1 - Cmd.Color.FValues[3]));
       end;
   else
     R := 0;
@@ -683,8 +777,8 @@ begin
     Exit;
   end;
 
-  { Check cache }
-  FontHash := ComputeFontHash(FontData);
+  { Check cache. The content hash (full N-byte scan) is memoized per FontID. }
+  FontHash := MemoizedFontHash(AFontID, FontData);
   I := FFontCacheKeys.IndexOf(FontHash);
   if I >= 0 then
   begin
@@ -885,6 +979,7 @@ begin
     [GlyphRun.GlyphCount, GlyphScale, FPixelsPerMM]));
   I_GlyphsRasterized := 0;
   I_GlyphSkipped := 0; I_GlyphRendered := 0;
+  I_CmapGlyphIdx := 0; { diagnostics read it even in gkkGlyphIndex mode }
   for I := 0 to GlyphRun.GlyphCount - 1 do
   begin
     if GlyphRun.Glyphs[I].GlyphID < 0 then
@@ -898,7 +993,10 @@ begin
     GlyphIdx := 0;
     case GlyphRun.Glyphs[I].KeyKind of
       gkkGlyphIndex:
-        GlyphIdx := Cardinal(GlyphRun.Glyphs[I].GlyphID);
+        begin
+          I_CmapGlyphIdx := GlyphRun.Glyphs[I].GlyphID;
+          GlyphIdx := Cardinal(GlyphRun.Glyphs[I].GlyphID);
+        end;
       gkkUnicodeScalar:
         begin
           I_CmapGlyphIdx := Face.CharCodeToGlyphIndex(Cardinal(GlyphRun.Glyphs[I].GlyphID));
@@ -916,25 +1014,25 @@ begin
     if GlyphIdx = 0 then Continue;
 
     { Decode color }
-    case Color.FType of
-      cctRGB:
-        begin
-          R := Round(Color.FValues[0] * 255);
-          G := Round(Color.FValues[1] * 255);
-          B := Round(Color.FValues[2] * 255);
-        end;
-      cctGray:
-        begin
-          R := Round(Color.FValues[0] * 255);
-          G := R;
-          B := R;
-        end;
-      cctCMYK:
-        begin
-          R := Round((1 - Color.FValues[0]) * (1 - Color.FValues[3]) * 255);
-          G := Round((1 - Color.FValues[1]) * (1 - Color.FValues[3]) * 255);
-          B := Round((1 - Color.FValues[2]) * (1 - Color.FValues[3]) * 255);
-        end;
+  case Color.FType of
+    cctRGB:
+      begin
+        R := ClampColorComponent255(Color.FValues[0]);
+        G := ClampColorComponent255(Color.FValues[1]);
+        B := ClampColorComponent255(Color.FValues[2]);
+      end;
+    cctGray:
+      begin
+        R := ClampColorComponent255(Color.FValues[0]);
+        G := R;
+        B := R;
+      end;
+    cctCMYK:
+      begin
+        R := ClampColorComponent255((1 - Color.FValues[0]) * (1 - Color.FValues[3]));
+        G := ClampColorComponent255((1 - Color.FValues[1]) * (1 - Color.FValues[3]));
+        B := ClampColorComponent255((1 - Color.FValues[2]) * (1 - Color.FValues[3]));
+      end;
     else
       R := 0; G := 0; B := 0;
     end;
@@ -1052,7 +1150,7 @@ begin
   { Phase 1 FIX: Image cache owns all surfaces (OwnsObjects=True).
     Never free a cached surface here - that causes UAF.
     The cache's destructor or eviction handles freeing. }
-  ImgSurface := GetCachedImage(Cmd.ImageData);
+  ImgSurface := GetCachedImage(Cmd.ImageData, Cmd.CacheKey);
   if not Assigned(ImgSurface) then
   begin
     Stream := TBytesStream.Create(Cmd.ImageData);
@@ -1076,7 +1174,7 @@ begin
     finally
       Stream.Free;
     end;
-    CacheImage(Cmd.ImageData, ImgSurface);
+    CacheImage(Cmd.ImageData, Cmd.CacheKey, ImgSurface);
   end;
 
   { Image matrix is in mm. FState.Transform already has mm-to-pixel scale from init.
@@ -1131,13 +1229,13 @@ begin
   case AColor.FType of
     cctRGB:
       begin
-        R := Round(AColor.FValues[0] * 255);
-        G := Round(AColor.FValues[1] * 255);
-        B := Round(AColor.FValues[2] * 255);
+        R := ClampColorComponent255(AColor.FValues[0]);
+        G := ClampColorComponent255(AColor.FValues[1]);
+        B := ClampColorComponent255(AColor.FValues[2]);
       end;
     cctGray:
       begin
-        R := Round(AColor.FValues[0] * 255); G := R; B := R;
+        R := ClampColorComponent255(AColor.FValues[0]); G := R; B := R;
       end;
   else
     R := 0; G := 0; B := 0;
@@ -1204,7 +1302,7 @@ begin
   if FSurface = nil then Exit;
   if (Cmd.ClipWidth <= 0) or (Cmd.ClipHeight <= 0) then Exit;
 
-  ImgSurface := GetCachedImage(Cmd.ImageData);
+  ImgSurface := GetCachedImage(Cmd.ImageData, Cmd.CacheKey);
   if not Assigned(ImgSurface) then
   begin
     Stream := TBytesStream.Create(Cmd.ImageData);
@@ -1228,7 +1326,7 @@ begin
     finally
       Stream.Free;
     end;
-    CacheImage(Cmd.ImageData, ImgSurface);
+    CacheImage(Cmd.ImageData, Cmd.CacheKey, ImgSurface);
   end;
 
   { Map the clip region (mm, relative to the full boundary) to source pixels. }
@@ -1341,7 +1439,8 @@ begin
   Result := False;
   ASurface := nil;
   if Length(AOfdBytes) < 8 then Exit;
-  TmpPath := GetTempDir + 'ofd_seal_' + IntToStr(GetTickCount64) + '.ofd';
+  TmpPath := GetTempDir + 'ofd_seal_' + IntToStr(GetTickCount64) + '_' +
+    IntToStr(InterLockedIncrement(SealTempSeq)) + '.ofd';
   try
     with TFileStream.Create(TmpPath, fmCreate) do
     try
@@ -1453,8 +1552,15 @@ begin
   end;
   if Assigned(SealSurface) and (SealSurface.Width > 0) and (SealSurface.Height > 0) then
     FSealSurfaces.Add(SealSurface)
-  else if Assigned(SealSurface) then
-    SealSurface.Free;
+  else
+  begin
+    if Assigned(SealSurface) then
+      SealSurface.Free;
+    { Keep the list aligned with the display-list seal commands: a failed
+      pre-render must add a nil placeholder, otherwise a later seal command
+      would consume an earlier seal's surface (wrong stamp position). }
+    FSealSurfaces.Add(nil);
+  end;
 end;
 
 procedure TOFDRenderService.RenderSeal(Cmd: TOFDSealCommand);
@@ -1475,6 +1581,8 @@ begin
   { Consume the pre-rendered seal surface for this command (display-list order). }
   SealSurface := TOFDSurface(FSealSurfaces.Extract(FSealSurfaces[0]));
   try
+    if not Assigned(SealSurface) then
+      Exit; { corresponding seal pre-render failed: nothing to draw here }
     SrcW := SealSurface.Width;
     SrcH := SealSurface.Height;
     if (SrcW <= 0) or (SrcH <= 0) then Exit;
@@ -1587,17 +1695,33 @@ begin
             FState.ClipMask := TOFDCompositor.RasterizePathToMask(
               LClipCmd.Path, FState.Transform, FSurface.Width, FSurface.Height);
             FState.HasClip := True;
+            { Decide degeneracy from the clip geometry once, at push time (the
+              pop site no longer has the clip path available). }
+            FState.ClipDegenerate := IsClipBoundsEmpty(LClipCmd.Path,
+              FState.Transform, FSurface.Width, FSurface.Height);
             { Render the clipped object to a TEMP surface so the clip mask can be
               applied to ONLY that object. Applying the mask directly to the main
               surface wiped the whole page (alpha=0 everywhere outside a small or
               off-page clip), destroying earlier content such as the page's black
               background fill. }
+            LClipSurface := FSurface;
             FClipSurfaceStack.Push(FSurface);
-            FSurface := TOFDSurface.Create(FSurface.Width, FSurface.Height);
+            try
+              FSurface := TOFDSurface.Create(FSurface.Width, FSurface.Height);
+            except
+              { Surface allocation failed: undo the stack push and treat the
+                clip as a no-op so the matching ctPopClip cannot double-free
+                the real surface. }
+              FClipSurfaceStack.Pop;
+              FState.ClipMask := nil;
+              FState.ClipDegenerate := False;
+              FState.HasClip := False;
+            end;
           end
           else
           begin
             FState.ClipMask := nil;
+            FState.ClipDegenerate := False;
             FState.HasClip := False;
           end;
         end;
@@ -1608,22 +1732,31 @@ begin
             { FSurface is the temp for this clip; LClipSurface is its parent. }
             LClipSurface := TOFDSurface(FClipSurfaceStack.Pop);
             try
-              if FState.HasClip and (Length(FState.ClipMask) > 0) then
+              if FSurface <> LClipSurface then
               begin
-                { If the clip rasterized to (almost) nothing — e.g. a small or
-                  off-page clip area whose transform landed outside the page — the
-                  clip is degenerate/broken and must NOT hide the object. Applying
-                  it would wipe the object (and, before the temp-surface change,
-                  the whole page). Composite the object unclipped instead. }
-                if not IsClipMaskEmpty(FState.ClipMask) then
-                  TOFDCompositor.ApplyClipMask(FSurface, FState.ClipMask);
-                if Assigned(LClipSurface) then
-                  TOFDCompositor.SourceOver(FSurface, LClipSurface, 0, 0);
+                if FState.HasClip and (Length(FState.ClipMask) > 0) then
+                begin
+                  { A degenerate/off-page clip (see IsClipBoundsEmpty) must NOT
+                    hide the object: composite the object unclipped instead.
+                    Applying the mask would wipe the object (and, before the
+                    temp-surface change, the whole page). }
+                  if not FState.ClipDegenerate then
+                    TOFDCompositor.ApplyClipMask(FSurface, FState.ClipMask);
+                  if Assigned(LClipSurface) then
+                    TOFDCompositor.SourceOver(FSurface, LClipSurface, 0, 0);
+                end;
+                FSurface.Free;
+                FSurface := LClipSurface;
               end;
+              { else: the temp creation failed at the matching ctPushClip; the
+                clip was treated as a no-op there and FSurface is still the
+                parent surface - do NOT free it (would double-free, UAF). }
             finally
-              FSurface.Free;
+              { Free the temp exactly once on any exception path. }
+              if FSurface <> LClipSurface then
+                FSurface.Free;
+              FSurface := LClipSurface;
             end;
-            FSurface := LClipSurface;
           end;
           RestoreState;
         end;
@@ -1636,7 +1769,14 @@ begin
           LGroupInfoItem.Info.Alpha := LGroupCmd.Alpha;
           LGroupInfoItem.Info.BlendMode := LGroupCmd.BlendMode;
           LGroupInfoItem.Info.Isolated := LGroupCmd.Isolated;
-          LGroupSurface := TOFDSurface.Create(FSurface.Width, FSurface.Height);
+          { Create the surface into a local first: if the allocation raises the
+            info item must still be freed (it was not pushed yet). }
+          try
+            LGroupSurface := TOFDSurface.Create(FSurface.Width, FSurface.Height);
+          except
+            LGroupInfoItem.Free;
+            raise;
+          end;
           FGroupSurfaceStack.Push(LGroupSurface);
           FGroupInfoStack.Push(LGroupInfoItem);
           FSurface := LGroupSurface;
@@ -1914,6 +2054,8 @@ var
   StepX, StepY, CellW, CellH: Double;
   TileMat, TransMat, CellMat: TOFDMatrix;
   Rendered, Failed: Integer;
+  LParentSurface, LTemp, LPopped: TOFDSurface;
+  LClipDegenerate: Boolean;
 begin
   if not Assigned(Cmd) or not Assigned(FSurface) then Exit;
 
@@ -1943,50 +2085,91 @@ begin
   if CellH <= 0 then CellH := StepY;
 
   { Clip tiled content to the fill path so pattern cells do not bleed outside
-    the region being filled (important for watermarks over a page rect). }
+    the region being filled (important for watermarks over a page rect). Render
+    the tiles to a TEMP surface, then composite it onto the real surface
+    masked by the clip region - identical to the ctPushClip/ctPopClip strategy.
+    Previously the tiles were drawn directly on the MAIN surface and the mask
+    was applied to it there, zeroing alpha outside the pattern region and
+    wiping everything drawn earlier. }
   SaveState;
-  FState.ClipMask := TOFDCompositor.RasterizePathToMask(
-    Cmd.Path, FState.Transform, FSurface.Width, FSurface.Height);
-  FState.HasClip := True;
-
-  Rendered := 0;
-  Failed := 0;
-  TileCount := 0;
   try
-    J := 0;
-    while (MinY + J * StepY) <= MaxY do
-    begin
-      if TileCount >= MaxPatternTiles then Break;
-      I := 0;
-      while (MinX + I * StepX) <= MaxX do
-      begin
-        { Guard against pathological patterns (near-zero steps, huge fill
-          bounds) that could otherwise tile unboundedly and stall rendering. }
-        if TileCount >= MaxPatternTiles then Break;
-        Inc(TileCount);
-        { Tile transform = current state * pattern CTM * translate(tile origin).
-          The pattern CTM maps the cell-local space into the fill coordinate
-          space; the tile origin shifts by the XStep/YStep grid. }
-        TransMat := MatrixIdentity;
-        TransMat[0, 2] := MinX + I * StepX;
-        TransMat[1, 2] := MinY + J * StepY;
-        CellMat := MatrixMultiply(Cmd.Pattern.CellTransform, TransMat);
+    FState.ClipMask := TOFDCompositor.RasterizePathToMask(
+      Cmd.Path, FState.Transform, FSurface.Width, FSurface.Height);
+    FState.HasClip := True;
+    LClipDegenerate := IsClipBoundsEmpty(Cmd.Path, FState.Transform,
+      FSurface.Width, FSurface.Height);
+    LParentSurface := FSurface;
+    LTemp := nil;
+    FClipSurfaceStack.Push(FSurface);
+    try
+      FSurface := TOFDSurface.Create(FSurface.Width, FSurface.Height);
+      LTemp := FSurface;
+    except
+      FClipSurfaceStack.Pop;
+      FState.ClipMask := nil;
+      FState.HasClip := False;
+      Exit;
+    end;
 
-        SaveState;
-        FState.Transform := MatrixMultiply(FState.Transform, CellMat);
-        try
-          RenderDisplayListCommands(Cmd.CellContent, nil, Rendered, Failed);
-        finally
-          RestoreState;
+    Rendered := 0;
+    Failed := 0;
+    TileCount := 0;
+    try
+      J := 0;
+      while (MinY + J * StepY) <= MaxY do
+      begin
+        if TileCount >= MaxPatternTiles then Break;
+        I := 0;
+        while (MinX + I * StepX) <= MaxX do
+        begin
+          { Guard against pathological patterns (near-zero steps, huge fill
+            bounds) that could otherwise tile unboundedly and stall rendering. }
+          if TileCount >= MaxPatternTiles then Break;
+          Inc(TileCount);
+          { Tile transform = current state * pattern CTM * translate(tile origin).
+            The pattern CTM maps the cell-local space into the fill coordinate
+            space; the tile origin shifts by the XStep/YStep grid. }
+          TransMat := MatrixIdentity;
+          TransMat[0, 2] := MinX + I * StepX;
+          TransMat[1, 2] := MinY + J * StepY;
+          CellMat := MatrixMultiply(Cmd.Pattern.CellTransform, TransMat);
+
+          SaveState;
+          FState.Transform := MatrixMultiply(FState.Transform, CellMat);
+          try
+            RenderDisplayListCommands(Cmd.CellContent, nil, Rendered, Failed);
+          finally
+            RestoreState;
+          end;
+          Inc(I);
         end;
-        Inc(I);
+        Inc(J);
       end;
-      Inc(J);
+    finally
+      { Apply the clip mask to the temp surface only, then composite it over
+        the parent surface and restore the pre-clip state. }
+      if Assigned(LTemp) then
+      begin
+        if (FSurface = LTemp) then
+        begin
+          if FState.HasClip and (Length(FState.ClipMask) > 0) and
+             (not LClipDegenerate) then
+            TOFDCompositor.ApplyClipMask(LTemp, FState.ClipMask);
+          TOFDCompositor.SourceOver(LTemp, LParentSurface, 0, 0);
+          FSurface := LParentSurface;
+        end;
+        LTemp.Free;
+      end;
+      { Pop our own stack entry unless nested content already consumed it. }
+      if FClipSurfaceStack.Count > 0 then
+      begin
+        LPopped := TOFDSurface(FClipSurfaceStack.Pop);
+        if (LPopped <> nil) and (LPopped <> LParentSurface) then
+          FClipSurfaceStack.Push(LPopped);
+      end;
+      FSurface := LParentSurface;
     end;
   finally
-    { Apply the clip mask and restore the pre-clip state. }
-    if FState.HasClip and (Length(FState.ClipMask) > 0) then
-      TOFDCompositor.ApplyClipMask(FSurface, FState.ClipMask);
     RestoreState;
   end;
 end;
