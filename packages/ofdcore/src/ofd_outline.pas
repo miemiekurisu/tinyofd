@@ -16,8 +16,7 @@ function ParseBookmarksXML(const AXML: String;
 
 implementation
 
-function ParseBookmarksXML(const AXML: String;
-  const APages: TObjectList): TOFDOutline;
+procedure ParseOutlineBody(const AXML: String; AOutline: TOFDOutline);
 var
   Parser: TOFDXMLParser;
   Root, BookmarksNode, BookmarkNode, DestNode: TOFDXMLNode;
@@ -29,7 +28,6 @@ var
   Name, PageID, DestType: String;
   Left, Top, Zoom: Double;
 begin
-  Result := TOFDOutline.Create;
   if AXML = '' then
     Exit;
 
@@ -60,6 +58,9 @@ begin
           Name := Format('Bookmark_%d', [I]);
 
         BM := TOFDBookmark.Create(Name, 0);
+        { Hand ownership to the outline immediately: every raise below frees
+          through AOutline instead of leaking BM (and its Dest). }
+        AOutline.AddRootBookmark(BM);
 
         { Parse Dest }
         DestNode := BookmarkNode.FindChild('Dest');
@@ -93,14 +94,24 @@ begin
         finally
           ChildNodes.Free;
         end;
-
-        Result.AddRootBookmark(BM);
       end;
     finally
       TopLevelNodes.Free;
     end;
   finally
     Parser.Free;
+  end;
+end;
+
+function ParseBookmarksXML(const AXML: String;
+  const APages: TObjectList): TOFDOutline;
+begin
+  Result := TOFDOutline.Create;
+  try
+    ParseOutlineBody(AXML, Result);
+  except
+    Result.Free;
+    raise;
   end;
 end;
 

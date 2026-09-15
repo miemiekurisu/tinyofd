@@ -105,9 +105,11 @@ begin
     we clamp to the (new) last tab. }
   if FActiveIndex > AIndex then Dec(FActiveIndex)
   else if FActiveIndex >= FTabs.Count then FActiveIndex := FTabs.Count - 1;
-  if FHoverIndex > AIndex then Dec(FHoverIndex)
+  if FHoverIndex = AIndex then FHoverIndex := -1
+  else if FHoverIndex > AIndex then Dec(FHoverIndex)
   else if FHoverIndex >= FTabs.Count then FHoverIndex := FTabs.Count - 1;
-  if FHoverClose > AIndex then Dec(FHoverClose)
+  if FHoverClose = AIndex then FHoverClose := -1
+  else if FHoverClose > AIndex then Dec(FHoverClose)
   else if FHoverClose >= FTabs.Count then FHoverClose := FTabs.Count - 1;
   Invalidate;
 end;
