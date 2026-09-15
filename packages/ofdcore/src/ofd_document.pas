@@ -362,6 +362,22 @@ begin
     end;
     FSignatureStamps.Clear;
   end;
+  { The CGU cache owns a second XML tree parsed from the PREVIOUS document's
+    DocumentRes.xml. Without this reset a reopened document keeps
+    FCguParsed=True, so ParseCompositeGraphicUnitsCache early-exits and
+    GetCompositeGraphicUnit keeps handing out the old document's nodes. }
+  FCguLock.Enter;
+  try
+    FCguNodeCache.Clear;
+    if Assigned(FCguParser) then
+    begin
+      FCguParser.Free;
+      FCguParser := nil;
+    end;
+    FCguParsed := False;
+  finally
+    FCguLock.Leave;
+  end;
 end;
 
 function TOFDDocument.IsOpen: Boolean;
@@ -1027,7 +1043,10 @@ begin
           Inc(J);
       if J + 4 < Length(AData) then
       begin
-        SetLength(Result, J + 22 - I);
+        { 命中 EOCD 签名并不代表尾部还有完整的 22 字节：截断/伪造的签名块里
+          J+22 可以越过缓冲区末尾，直接按 J+22-I 复制会越界读堆内存。
+          统一裁剪到实际剩余字节数。 }
+        SetLength(Result, Min(J + 22 - I, Length(AData) - I));
         Move(AData[I], Result[0], Length(Result));
         AIsOFD := True;
       end

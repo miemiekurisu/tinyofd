@@ -2013,6 +2013,34 @@ begin
   FObjects.Add(TxtObj);
 end;
 
+const
+  { OFD 的 DeltaX/DeltaY 支持 "g N value" 重复语法，N 直接来自不可信 XML。
+    上限 65536：项目发票语料里最大 N=63，正常排版远小于该值，但畸形/恶意文件
+    不能再用一个属性申请上十亿个 Double（≈8 GB）把解析进程打爆。 }
+  OFD_MAX_DELTA_VALUES = 65536;
+
+{ DeltaX/DeltaY 动态追加：容量按几何增长，避免逐项 SetLength 的 O(n^2) 重分配；
+  总长度受 OFD_MAX_DELTA_VALUES 约束。调用方在展开结束后用 SetLength(Values, Count)
+  去掉预留尾部，保证交付给 TOFDTextCode 的数组 Length 精确。 }
+procedure OFDAppendDeltaValue(var AValues: TOFDDoubleArray; var ACount: Integer;
+  const AValue: Double);
+var
+  LCap: Integer;
+begin
+  if ACount >= OFD_MAX_DELTA_VALUES then Exit;
+  if ACount >= Length(AValues) then
+  begin
+    LCap := Length(AValues) * 2;
+    if LCap < 16 then
+      LCap := 16;
+    if LCap > OFD_MAX_DELTA_VALUES then
+      LCap := OFD_MAX_DELTA_VALUES;
+    SetLength(AValues, LCap);
+  end;
+  AValues[ACount] := AValue;
+  Inc(ACount);
+end;
+
 procedure TOFDPage.ParseTextCodes(const ANode: TOFDXMLNode;
   const ATextObj: TOFDTextObject);
 var
@@ -2067,11 +2095,12 @@ begin
           begin
             J := StrToIntDef(DeltaParts[K + 1], 1);
             LastValue := DeltaParts[K + 2];
+            { 重复次数按剩余配额裁剪：既限内存也限循环次数，避免恶意 N 变成 CPU 空转 }
+            if J > OFD_MAX_DELTA_VALUES - Count then
+              J := OFD_MAX_DELTA_VALUES - Count;
             while J > 0 do
             begin
-              SetLength(DeltaValues, Count + 1);
-              DeltaValues[Count] := StrToFloatDef(LastValue, 0);
-              Inc(Count);
+              OFDAppendDeltaValue(DeltaValues, Count, StrToFloatDef(LastValue, 0));
               Dec(J);
             end;
             Inc(K, 3);
@@ -2079,17 +2108,14 @@ begin
           else
           begin
             if TryStrToFloat(DeltaParts[K], DV) then
-            begin
-              SetLength(DeltaValues, Count + 1);
-              DeltaValues[Count] := DV;
-              Inc(Count);
-            end;
+              OFDAppendDeltaValue(DeltaValues, Count, DV);
             Inc(K);
           end;
         end;
       finally
         DeltaParts.Free;
       end;
+      SetLength(DeltaValues, Count);
     end;
 
     { GAP-10 FIX: DeltaY 同样解析为数组，使用动态追加 }
@@ -2110,11 +2136,11 @@ begin
           begin
             J := StrToIntDef(DeltaParts[K + 1], 1);
             LastValue := DeltaParts[K + 2];
+            if J > OFD_MAX_DELTA_VALUES - Count then
+              J := OFD_MAX_DELTA_VALUES - Count;
             while J > 0 do
             begin
-              SetLength(DeltaYValues, Count + 1);
-              DeltaYValues[Count] := StrToFloatDef(LastValue, 0);
-              Inc(Count);
+              OFDAppendDeltaValue(DeltaYValues, Count, StrToFloatDef(LastValue, 0));
               Dec(J);
             end;
             Inc(K, 3);
@@ -2122,17 +2148,14 @@ begin
           else
           begin
             if TryStrToFloat(DeltaParts[K], DV) then
-            begin
-              SetLength(DeltaYValues, Count + 1);
-              DeltaYValues[Count] := DV;
-              Inc(Count);
-            end;
+              OFDAppendDeltaValue(DeltaYValues, Count, DV);
             Inc(K);
           end;
         end;
       finally
         DeltaParts.Free;
       end;
+      SetLength(DeltaYValues, Count);
     end;
 
     { 负 DeltaX 必须保留，密码区/多行定位/压缩排版依赖负值 }
@@ -2291,6 +2314,7 @@ end;
 procedure TOFDPage.ParsePathObject(const ANode: TOFDXMLNode); overload;
 var
   PathNode: TOFDXMLNode;
+  ClipNode, ClipAreaN, ClipPathN, ClipDataN: TOFDXMLNode;
   CTMStr, BoundStr: String;
   Parts, ParsedCmds: TStringList;
   PathObj: TOFDPathObject;
@@ -2440,6 +2464,34 @@ begin
       PathNode := ANode.FindChild('PathData');
       if Assigned(PathNode) then
         FPathData := PathNode.TextContent;
+    end;
+
+    { GAP: Parse nested <ofd:Clips> on a PathObject into a clip path.
+      The clip Area's <ofd:Path> AbbreviatedData is stored for the compiler
+      to emit a PushClip before filling, so gradient-filled rectangles can be
+      clipped to their intended emblem/shape outline.
+      Audit R3: this block existed only in the Layer overload, so an otherwise
+      identical PathObject that sits directly under <Content> (no Layer) lost
+      its clip — the two copies had drifted on real attribute handling. }
+    ClipNode := ANode.FindChild('Clips');
+    if Assigned(ClipNode) then
+    begin
+      ClipAreaN := ClipNode.FindChild('Clip');
+      if Assigned(ClipAreaN) then
+        ClipAreaN := ClipAreaN.FindChild('Area');
+      if Assigned(ClipAreaN) then
+      begin
+        ClipPathN := ClipAreaN.FindChild('Path');
+        if Assigned(ClipPathN) then
+        begin
+          ClipDataN := ClipPathN.FindChild('AbbreviatedData');
+          if Assigned(ClipDataN) and (ClipDataN.TextContent <> '') then
+          begin
+            FClipPath := ClipDataN.TextContent;
+            FHasClip := True;
+          end;
+        end;
+      end;
     end;
   end;
 
@@ -2866,6 +2918,12 @@ begin
     FStrokeColorSet := FStrokeColor <> '';
     FHScale := StrToFloatDef(ANode.GetAttribute('HScale'), 1);
     FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
+    { Audit R3: these three attributes were read only by the non-Layer overload,
+      so identical text objects kept different models depending on whether they
+      happened to sit inside a Layer. }
+    FReadDirection := StrToIntDef(ANode.GetAttribute('ReadDirection'), 0);
+    FCharDirection := StrToIntDef(ANode.GetAttribute('CharDirection'), 0);
+    FLetterSpacing := StrToFloatDef(ANode.GetAttribute('LetterSpacing'), 0);
 
     ParseTextCodes(ANode, TxtObj);
   end;
@@ -3204,6 +3262,11 @@ var
   Node: TOFDXMLNode;
 begin
   GroupObj := TOFDGroupObject.Create(ANode.GetAttribute('ID'));
+  { Audit R3: the non-Layer overload applies the Group's @Boundary/@CTM (and the
+    compiler translates both into the group transform), so a Group inside a Layer
+    used to lose its offset. Also accept the child types the non-Layer overload
+    reaches through ParseLayerChildren (Region / VectorShape / PageBlock). }
+  ParseObjectBoundaryAndCTM(ANode, GroupObj);
   Children := ANode.Children;
   OldCount := FObjects.Count;
   for I := 0 to Children.Count - 1 do
@@ -3219,6 +3282,12 @@ begin
       ParsePathObject(Node, nil)
 else if SameText(ExtractLocalName(Node.TagName), 'CompositeObject') then
        ParseCompositeObject(Node)
+    else if SameText(ExtractLocalName(Node.TagName), 'Region') then
+      ParseRegionObject(Node, nil)
+    else if SameText(ExtractLocalName(Node.TagName), 'VectorShape') then
+      ParseVectorShape(Node)
+    else if SameText(ExtractLocalName(Node.TagName), 'PageBlock') then
+      ParseLayerChildren(Node)
     else if SameText(ExtractLocalName(Node.TagName), 'Layer') then
     begin
       ParseLayerChildren(Node);
@@ -3243,8 +3312,12 @@ var
 begin
   RegionObj := TOFDRegionObject.Create(ANode.GetAttribute('ID'));
   RegionObj.ClipPath := ANode.GetAttribute('clipPath');
+  { Audit R3: every other Layer-aware overload falls back to FObjects when
+    ALayer is nil (Group children pass nil); without it the region leaked. }
   if Assigned(ALayer) then
-    ALayer.AddChild(RegionObj);
+    ALayer.AddChild(RegionObj)
+  else
+    FObjects.Add(RegionObj);
 end;
 
 procedure TOFDPage.ParseAnnotationsXML(const AXML: String);

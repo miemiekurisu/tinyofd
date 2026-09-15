@@ -83,7 +83,9 @@ begin
     Result := PTextMatch(Pointer(FMatches[Index]))^
   else
   begin
-    FillChar(Result, SizeOf(Result), 0);
+    { TOFDTextMatch 含 UnicodeString 字段，FillChar 会把引用计数指针直接清零
+      （托管类型上的 UB）。Default() 做的是带终结化的初始化，语义等价且安全。 }
+    Result := Default(TOFDTextMatch);
   end;
 end;
 
@@ -131,6 +133,7 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
   Texts: TStringList;
+  SB: TStringBuilder;
   I: Integer;
 begin
   Result := '';
@@ -146,8 +149,16 @@ begin
     Texts := TStringList.Create;
     try
       ExtractFromObjects(Page.Objects, Texts);
-      for I := 0 to Texts.Count - 1 do
-        Result := Result + Texts[I];
+      { AGENTS 8.4：循环内 Result := Result + X 对整页文本是 O(n^2) 复制，
+        改用 TStringBuilder 一次性成型 }
+      SB := TStringBuilder.Create;
+      try
+        for I := 0 to Texts.Count - 1 do
+          SB.Append(Texts[I]);
+        Result := SB.ToString;
+      finally
+        SB.Free;
+      end;
     finally
       Texts.Free;
     end;
@@ -224,7 +235,10 @@ begin
   SearchPos := PosEx(Query, Text, 1);
   while SearchPos > 0 do
   begin
-    FillChar(Match, SizeOf(Match), 0);
+    { Match 是含 UnicodeString 的托管记录：FillChar 会在不 decref 的情况下清掉
+      上一轮 AddMatch 之后仍被本地变量持有的字符串指针，每次命中都泄漏一份
+      Match.Text。Default() 先终结化再置零，语义等价且不泄漏。 }
+    Match := Default(TOFDTextMatch);
     Match.PageIndex := APageIndex;
     Match.Text := Copy(PageText, SearchPos, QueryLen);
     Match.MatchStart := SearchPos - 1;

@@ -350,9 +350,10 @@ begin
   end;
 
   { 把子元素开启前缓冲的文本刷进父节点，避免混合内容在清空 FTextBuf 时丢失
-    （与 EndElement 同样的追加语义） }
+    （与 EndElement 同样的追加语义）。Parent 为 nil 的情况只有 Root 分支，
+    此时不能解引用 Parent（历史实现会在 FTextBuf 非空时 AV）。 }
   Text := FTextBuf.ToString;
-  if Text <> '' then
+  if Assigned(Parent) and (Text <> '') then
   begin
     if Parent.FTextContent = '' then
       Parent.FTextContent := Text
@@ -703,7 +704,12 @@ begin
 
   Inc(FDepth);
   if FDepth > OFD_MAX_XML_DEPTH then
+  begin
+    { 深度上限是安全出口，也必须释放已解析出来的属性表；否则一份深层嵌套的
+      恶意文档就能让每次解析都泄漏一个 TOFDXMLAttributes }
+    Attrs.Free;
     raise EOFDXmlError.CreateFmt('XML 嵌套深度超限 (位置: %d)', [FPos]);
+  end;
 
   { Self-closing tag }
   if (FPos <= FLength) and (FXML[FPos] = '/') then
@@ -800,7 +806,14 @@ procedure TOFDXMLParser.ParseStream(const AXML: String; const AHandler: TOFDXMLH
 begin
   FXML := AXML;
   FHandler := AHandler;
-  Parse;
+  try
+    Parse;
+  finally
+    { SAX handler 由调用方持有：解析结束后必须解除引用，否则调用方释放
+      handler 后，本解析器再被复用（LoadFromString / Destroy）会对已释放
+      对象做 "is TOFDDOMHandler" 测试甚至 Free，导致悬垂指针二次释放。 }
+    FHandler := nil;
+  end;
 end;
 
 procedure TOFDXMLParser.LoadFromString(const AXML: String);
