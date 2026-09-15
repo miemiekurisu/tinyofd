@@ -21,6 +21,11 @@ type
     procedure TestGroupObjectCreate;
     procedure TestGroupObjectAdd;
     procedure TestGroupObjectDestroy;
+    procedure TestClampAlpha_Valid;
+    procedure TestClampAlpha_Boundary;
+    procedure TestClampAlpha_OutOfRange;
+    procedure TestClampAlpha_Invalid;
+    procedure TestClampAlpha_Random;
   end;
 implementation
 procedure TTestOFDPageModels.TestBoundaryCreate;
@@ -199,6 +204,59 @@ begin
   G.Objects.Add(TOFDTextObject.Create('c2'));
   CheckEquals(2, G.Objects.Count, 'two children before destroy');
   G.Free;
+end;
+procedure TTestOFDPageModels.TestClampAlpha_Valid;
+begin
+  CheckEquals(0,   OFDClampAlpha('0'),   '0');
+  CheckEquals(1,   OFDClampAlpha('1'),   '1');
+  CheckEquals(128, OFDClampAlpha('128'), '128');
+  CheckEquals(255, OFDClampAlpha('255'), '255');
+end;
+procedure TTestOFDPageModels.TestClampAlpha_Boundary;
+begin
+  CheckEquals(0,   OFDClampAlpha('0'),   'lower bound');
+  CheckEquals(255, OFDClampAlpha('255'), 'upper bound');
+  CheckEquals(255, OFDClampAlpha('256'), 'just above upper clamps to 255');
+  CheckEquals(0,   OFDClampAlpha('-1'),  'just below lower clamps to 0');
+end;
+procedure TTestOFDPageModels.TestClampAlpha_OutOfRange;
+begin
+  { Regression: prior Byte truncation wrapped 300->44, 256->0, -1->255. }
+  CheckEquals(255, OFDClampAlpha('300'), '300 must clamp to 255, not wrap');
+  CheckEquals(255, OFDClampAlpha('256'), '256 must clamp to 255, not 0');
+  CheckEquals(255, OFDClampAlpha('1000'), '1000 must clamp to 255');
+  CheckEquals(0,   OFDClampAlpha('-256'), '-256 must clamp to 0');
+  CheckEquals(255, OFDClampAlpha(IntToStr(High(Integer))), 'MaxInt clamps to 255');
+  CheckEquals(0,   OFDClampAlpha(IntToStr(Low(Integer))),  'MinInt clamps to 0');
+end;
+procedure TTestOFDPageModels.TestClampAlpha_Invalid;
+begin
+  CheckEquals(255, OFDClampAlpha(''),       'empty defaults to 255');
+  CheckEquals(255, OFDClampAlpha('abc'),    'non-numeric defaults to 255');
+  CheckEquals(255, OFDClampAlpha('1.5'),    'decimal is not an int, defaults to 255');
+  CheckEquals(255, OFDClampAlpha('10abc'),  'trailing garbage defaults to 255');
+end;
+procedure TTestOFDPageModels.TestClampAlpha_Random;
+const
+  Seed = 20260915;
+var
+  I, V: Integer;
+  Got, Exp: Byte;
+begin
+  RandSeed := Seed;
+  for I := 0 to 499 do
+  begin
+    V := Random(1200) - 300; { range -300..899, spans below/in/above 0..255 }
+    if V < 0 then
+      Exp := 0
+    else if V > 255 then
+      Exp := 255
+    else
+      Exp := Byte(V);
+    Got := OFDClampAlpha(IntToStr(V));
+    CheckEquals(Exp, Got, Format('seed=%d V=%d', [Seed, V]));
+    CheckTrue(Got <= 255, Format('result always <=255 (seed=%d V=%d)', [Seed, V]));
+  end;
 end;
 initialization
   RegisterTest(TTestOFDPageModels);

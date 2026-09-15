@@ -100,6 +100,14 @@ type
     procedure TestOFDParsedPageShouldEvict_OverCapacity;
     procedure TestOFDParsedPageShouldEvict_ZeroCapacity;
     procedure TestOFDParsedPageShouldEvict_NegativeCapacity;
+    procedure TestOFDDisplayCacheShouldEvict_WithinBudget;
+    procedure TestOFDDisplayCacheShouldEvict_CountCapBoundary;
+    procedure TestOFDDisplayCacheShouldEvict_ByteBudgetBoundary;
+    procedure TestOFDDisplayCacheShouldEvict_EmptyCache;
+    procedure TestOFDDisplayCacheShouldEvict_OversizedEntry;
+    procedure TestOFDDisplayCacheShouldEvict_DisabledCaps;
+    procedure TestOFDDisplayCacheShouldEvict_NegativeInputs;
+    procedure TestOFDDisplayCacheShouldEvict_RandomSeeded;
   end;
 
 implementation
@@ -1237,6 +1245,138 @@ procedure TTestOFDTypes.TestOFDParsedPageShouldEvict_NegativeCapacity;
 begin
   CheckFalse(OFDParsedPageShouldEvict(0, -1), 'negative cap, empty list: no evict');
   CheckTrue(OFDParsedPageShouldEvict(2, -1), 'negative cap: evict');
+end;
+
+{ --- OFDDisplayCacheShouldEvict --- }
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_WithinBudget;
+begin
+  CheckFalse(OFDDisplayCacheShouldEvict(1, 4096, 4096, 1048576, 8),
+    '1 of 8 entries and plenty of bytes left: no evict');
+  CheckFalse(OFDDisplayCacheShouldEvict(7, 2048, 1024, High(Int64), 8),
+    'one below the count cap without byte pressure: no evict');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_CountCapBoundary;
+begin
+  { Boundary: count == cap evicts one before the insert, count == cap-1 does not. }
+  CheckFalse(OFDDisplayCacheShouldEvict(7, 0, 0, 0, 8), 'count cap-1: no evict');
+  CheckTrue(OFDDisplayCacheShouldEvict(8, 0, 0, 0, 8), 'count at cap: evict');
+  CheckTrue(OFDDisplayCacheShouldEvict(9, 0, 0, 0, 8), 'count over cap: evict');
+  CheckTrue(OFDDisplayCacheShouldEvict(1, 0, 0, 0, 1), 'cap 1 with one entry: evict');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_ByteBudgetBoundary;
+begin
+  { Inside the budget / exactly at the boundary / one byte over. }
+  CheckFalse(OFDDisplayCacheShouldEvict(1, 1000, 48, 1048, 8),
+    'current+add exactly at the budget fits');
+  CheckTrue(OFDDisplayCacheShouldEvict(1, 1000, 49, 1048, 8),
+    'one byte over the budget evicts');
+  CheckTrue(OFDDisplayCacheShouldEvict(1, 1049, 0, 1048, 8),
+    'already over the budget evicts even for a 0-byte insert');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_EmptyCache;
+begin
+  { Empty cache must always answer False: it is what terminates the caller's
+    eviction loop. }
+  CheckFalse(OFDDisplayCacheShouldEvict(0, 0, 1048576, 1, 1),
+    'empty cache with an oversized insert: no evict');
+  CheckFalse(OFDDisplayCacheShouldEvict(0, High(Int64), High(Int64), 1, 8),
+    'empty cache ignores byte pressure');
+  CheckFalse(OFDDisplayCacheShouldEvict(0, 0, 0, 0, 0),
+    'empty cache with every cap disabled: no evict');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_OversizedEntry;
+var
+  Budget: Int64;
+begin
+  { An entry larger than the whole budget evicts everything else and is then
+    cached alone (the caller hands out references and cannot free it itself). }
+  Budget := 1048576;
+  CheckTrue(OFDDisplayCacheShouldEvict(1, Budget div 2, Budget * 2, Budget, 8),
+    'oversized insert evicts the resident entry');
+  CheckFalse(OFDDisplayCacheShouldEvict(0, 0, Budget * 2, Budget, 8),
+    'loop terminates: oversized entry is cached alone');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_DisabledCaps;
+begin
+  { MaxBytes <= 0 disables the byte budget. }
+  CheckFalse(OFDDisplayCacheShouldEvict(5, 1000000000, 1000000000, 0, 8),
+    'zero byte budget disables the byte check');
+  CheckFalse(OFDDisplayCacheShouldEvict(5, 1000000000, 1000000000, -1, 8),
+    'negative byte budget disables the byte check');
+  { MaxEntries <= 0 keeps at most the entry being inserted. }
+  CheckTrue(OFDDisplayCacheShouldEvict(1, 0, 0, 0, 0), 'count cap 0 evicts');
+  CheckTrue(OFDDisplayCacheShouldEvict(3, 0, 0, 0, -5), 'negative count cap evicts');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_NegativeInputs;
+begin
+  { Negative byte values are treated as 0, negative counts as an empty cache. }
+  CheckFalse(OFDDisplayCacheShouldEvict(1, -5, -7, 100, 8),
+    'negative byte values clamp to zero: no evict');
+  CheckFalse(OFDDisplayCacheShouldEvict(-3, 100000, 100000, 1, 8),
+    'negative count is an empty cache: no evict');
+  CheckTrue(OFDDisplayCacheShouldEvict(1, -1, 101, 100, 8),
+    'negative current bytes still allow byte-driven eviction');
+end;
+
+procedure TTestOFDTypes.TestOFDDisplayCacheShouldEvict_RandomSeeded;
+const
+  Seed = 20260915;
+var
+  I, Count, Cap, Guard: Integer;
+  Cur, Add, Max: Int64;
+  Evicted: Integer;
+begin
+  { Randomized property check with a fixed seed (see docs/testing.md):
+    - an empty/negative count never evicts,
+    - a count at/over the cap always evicts,
+    - the caller's eviction loop always terminates and never leaves the cache
+      over the byte budget unless nothing is left to evict. }
+  RandSeed := Seed;
+  for I := 0 to 499 do
+  begin
+    Count := Random(20) - 4;                  { -4 .. 15 }
+    Cap := Random(10) - 1;                    { -1 .. 8 }
+    Cur := Int64(Random(20)) * 1000;
+    Add := Int64(Random(20)) * 1000;
+    Max := Int64(Random(12)) * 1000;          { 0 sometimes disables the budget }
+    if (Count <= 0) then
+      CheckFalse(OFDDisplayCacheShouldEvict(Count, Cur, Add, Max, Cap),
+        'random: empty cache never evicts (seed ' + IntToStr(Seed) + ')')
+    else if (Cap > 0) and (Count >= Cap) then
+      CheckTrue(OFDDisplayCacheShouldEvict(Count, Cur, Add, Max, Cap),
+        'random: count at/over cap evicts (seed ' + IntToStr(Seed) + ')');
+
+    { Simulate the caller's eviction loop. A real caller reports the SUM of the
+      bytes it holds, so the simulated total always stays consistent with the
+      entry count (one 1000-byte entry each) - that is what makes "loop ends at
+      an empty cache" observable here. }
+    if Count < 0 then Count := 0;
+    Cur := Int64(Count) * 1000;
+    Evicted := 0;
+    Guard := 0;
+    while OFDDisplayCacheShouldEvict(Count, Cur, Add, Max, Cap) do
+    begin
+      Dec(Count);
+      Dec(Cur, 1000);
+      Inc(Evicted);
+      Inc(Guard);
+      if Guard > 25 then Break;
+    end;
+    CheckTrue(Guard <= 25, 'random: eviction loop terminated (seed ' + IntToStr(Seed) + ')');
+    CheckTrue((Count >= 0) and (Count <= 15) and (Evicted <= 15),
+      'random: count stays in range (seed ' + IntToStr(Seed) + ')');
+    if (Max > 0) and (Count > 0) then
+      CheckTrue(Cur + Add <= Max,
+        'random: loop stops only inside the byte budget (seed ' +
+        IntToStr(Seed) + ')');
+  end;
 end;
 
 initialization

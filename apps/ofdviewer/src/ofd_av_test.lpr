@@ -103,6 +103,7 @@ var
   SkipBMP: Boolean;
   I: Integer;
   RunIdx: Integer;
+  RenderDPI: Double;
 begin
   Application.Initialize;
   WriteLn('=== AV Test ===');
@@ -110,12 +111,16 @@ begin
   GlobalDiagLogger.SetOutput('_tmp/diag_render.log');
   SkipBMP := False;
   PageIdx := -1;
+  RenderDPI := 96.0;
   for I := 1 to ParamCount do
   begin
     if SameText(ParamStr(I), '--no-write') then SkipBMP := True;
     { Optional: render only one page (0-based), e.g. --page=0 }
     if Pos('--page=', ParamStr(I)) = 1 then
       PageIdx := StrToIntDef(Copy(ParamStr(I), 8, MaxInt), 0);
+    { Optional: render DPI (thumbnail QA uses low DPI ~15), e.g. --dpi=15 }
+    if Pos('--dpi=', ParamStr(I)) = 1 then
+      RenderDPI := StrToFloatDef(Copy(ParamStr(I), 7, MaxInt), 96.0);
   end;
   if ParamCount < 1 then
   begin
@@ -174,7 +179,7 @@ begin
                   try
                     Svc.FontDataProvider := TAVFontProvider.Create(Doc);
                     Surface := Svc.RenderDisplayList(DisplayList,
-                      Page.Width, Page.Height, 96.0, 1.0);
+                      Page.Width, Page.Height, RenderDPI, 1.0);
                     try
                       RenderedBmp := TOFDSurfacePresenter.SurfaceToBitmap(Surface);
                       try

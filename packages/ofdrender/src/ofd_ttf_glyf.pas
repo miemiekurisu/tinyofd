@@ -6,7 +6,7 @@ unit ofd_ttf_glyf;
 interface
 
 uses
-  Classes, SysUtils, Types, Math;
+  Classes, SysUtils, Types;
 
 type
   TOFDGlyphPoint = record

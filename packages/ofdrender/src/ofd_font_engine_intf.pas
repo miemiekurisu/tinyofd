@@ -9,7 +9,7 @@ unit ofd_font_engine_intf;
 interface
 
 uses
-  Classes, SysUtils, ofd_types, ofd_ttf_glyf;
+  Classes, SysUtils, ofd_ttf_glyf;
 
 type
   { Font style flags }

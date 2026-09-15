@@ -19,7 +19,7 @@ uses
   Classes, SysUtils, SyncObjs, Contnrs, Graphics, Forms,
   ofd_types, ofd_document, ofd_page, ofd_resources, ofd_page_compiler,
   ofd_display_list, ofd_render_service, ofd_surface, ofd_surface_presenter,
-  ofd_render_diagnostics, ofd_render_outcome, ofd_font_engine_intf;
+  ofd_render_diagnostics, ofd_font_engine_intf;
 
 const
   cMaxWorkerCache = 24; { upper bound on cached page bitmaps }
@@ -241,7 +241,17 @@ end;
 
 destructor TOFDPageRenderWorker.Destroy;
 begin
+  { Join the thread BEFORE freeing the objects it touches. The views normally
+    call Terminate/Shutdown/WaitFor themselves, but TThread.Destroy only joins
+    at the very END of this destructor - so a caller that skips WaitFor would
+    otherwise have the worker wake up on a freed FEvent/lock (use-after-free).
+    All three calls are idempotent, so the normal path is unaffected. }
+  Terminate;
   Shutdown;
+  { Suspended (never started) means there is nothing to join - WaitFor on a
+    thread that never ran would block forever. }
+  if not Suspended then
+    WaitFor;
   FreeAndNil(FEvent);
   FreeAndNil(FQueueLock);
   FreeAndNil(FLock);

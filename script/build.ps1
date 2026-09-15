@@ -13,7 +13,7 @@
 #   $env:FPC_DIR       FPC 安装根目录 (含 bin\<cpu>-<os>\fpc.exe)
 # -----------------------------------------------------------------------------
 #Requires -Version 5.1
-param([switch]$Release)
+param([switch]$Release, [switch]$Warnings)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -103,6 +103,12 @@ $targets = @(
 )
 
 $argsBase = @('-B')
+# -Warnings: raise lazbuild verbosity so compiler warnings/notes reach the log
+if ($Warnings) {
+    $argsBase += @('--verbose')
+    $WARN_LOG = Join-Path $LOG_DIR 'build_warnings.log'
+    if (Test-Path $WARN_LOG) { Remove-Item $WARN_LOG }
+}
 if ($Release) {
     # Release: GUI (via -dRELEASE in ofdviewer.lpr) + optimization + strip,
     # NO debug info (-Xs does not strip DWARF, so we simply don't add -g).
@@ -132,6 +138,7 @@ foreach ($t in $targets) {
     $args = @($argsBase) + @($t)
     & $LAZBUILD @args 2>&1 | Tee-Object -Variable out | Out-Null
     $log = $out | Out-String
+    if ($Warnings) { $log | Add-Content -Path $WARN_LOG }
     if ($LASTEXITCODE -ne 0) {
         Write-Err "FAILED: $t (exit $LASTEXITCODE)"
         $log | Select-String 'Error|Fatal' | ForEach-Object { Write-Err $_.Line }

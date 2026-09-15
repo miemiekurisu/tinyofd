@@ -12,7 +12,7 @@ unit ofd_tab_strip;
 interface
 
 uses
-  Classes, SysUtils, Controls, Graphics, Types, LCLType, StdCtrls;
+  Classes, SysUtils, Controls, Graphics, Types, LCLType;
 
 type
   TOnTabIndexEvent = procedure(Sender: TObject; AIndex: Integer) of object;
@@ -55,9 +55,6 @@ const
   cOFDAccentBlue = $D77800;
 
 implementation
-
-uses
-  Math;
 
 const
   cMinTabWidth = 72;

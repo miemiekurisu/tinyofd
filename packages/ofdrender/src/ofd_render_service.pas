@@ -230,10 +230,25 @@ end;
   carry components >1 or <0; unclamped Round() values overflow the Byte in
   range-checked builds (dropping the whole object) or wrap visibly. }
 function ClampColorComponent255(AValue: Double): Byte;
+var
+  LClamped: Integer;
 begin
-  Result := Round(AValue * 255);
-  if Result > 255 then Result := 255
-  else if Result < 0 then Result := 0;
+  LClamped := Round(AValue * 255);
+  if LClamped > 255 then LClamped := 255
+  else if LClamped < 0 then LClamped := 0;
+  Result := LClamped;
+end;
+
+{ Convert an alpha in 0..1 to a Byte with Trunc semantics. Malformed
+  documents can carry alpha >1 or <0; unclamped Trunc() wraps in the Byte. }
+function ClampAlpha255(AValue: Double): Byte;
+var
+  LClamped: Integer;
+begin
+  LClamped := Trunc(AValue * 255);
+  if LClamped > 255 then LClamped := 255
+  else if LClamped < 0 then LClamped := 0;
+  Result := LClamped;
 end;
 
 const
@@ -243,6 +258,11 @@ const
   { Cap pattern tiling so a pathological pattern (near-zero step, huge fill
     bounds) cannot iterate unboundedly and stall rendering. }
   MaxPatternTiles = 100000;
+  { Typed separators for per-glyph cache keys: avoids an implicit
+    AnsiString->UnicodeString conversion of the literal per glyph rendered. }
+  cKeyColon: UnicodeString = ':';
+  cKeyComma: UnicodeString = ',';
+  cFormatFloat3: UnicodeString = '0.###';
 
 { TOFDFontFaceCacheEntry }
 
@@ -373,7 +393,7 @@ var
       SrcA_orig: Byte;
       DstB, DstG, DstR, DstA: Byte;
       OutB, OutG, OutR, OutA: Byte;
-      GroupAlpha: Byte;
+      GroupAlpha: Integer;
 begin
   if FGroupSurfaceStack.Count = 0 then Exit;
   if FGroupInfoStack.Count = 0 then Exit;
@@ -527,7 +547,7 @@ begin
   H := 0;
   for I := 0 to Length(AData) - 1 do
     H := (H * 31 + AData[I]) and $FFFFFFFF;
-  Result := IntToHex(H, 8) + ':' + IntToStr(Length(AData));
+  Result := IntToHex(H, 8) + cKeyColon + IntToStr(Length(AData));
 end;
 
 function TOFDRenderService.ComputeImageHash(const AData: TBytes): String;
@@ -649,8 +669,7 @@ begin
     B := 0;
   end;
 
-  A := Trunc(Cmd.Alpha * 255);
-  if A > 255 then A := 255;
+  A := ClampAlpha255(Cmd.Alpha);
   { CTM already includes mm-to-pixel scale from PageCompiler + Transform commands }
   CTM := FState.Transform;
   { Prefer anti-aliased fill for detailed paths (smooth thin strokes, e.g. seal
@@ -695,8 +714,7 @@ begin
     B := 0;
   end;
 
-  A := Trunc(Cmd.Alpha * 255);
-  if A > 255 then A := 255;
+  A := ClampAlpha255(Cmd.Alpha);
   CTM := FState.Transform;
   LineWidth := Cmd.LineWidth;
   { LineWidth is in mm, convert to pixels for compositor }
@@ -816,7 +834,7 @@ var
 begin
   Result := False;
   if not Assigned(AFace) then Exit;
-  Key := AFontID + ':' + IntToStr(AGlyphIdx);
+  Key := AFontID + cKeyColon + IntToStr(AGlyphIdx);
   I := FOutlineCacheKeys.IndexOf(Key);
   if I >= 0 then
   begin
@@ -862,10 +880,10 @@ begin
   ShapeCTM := AGlyphCTM;
   ShapeCTM[0, 2] := 0;
   ShapeCTM[1, 2] := 0;
-  Key := AFontID + ':' + IntToStr(AGlyphIdx)
-    + ':' + FormatFloat('0.###', ShapeCTM[0, 0]) + ',' + FormatFloat('0.###', ShapeCTM[0, 1])
-    + ',' + FormatFloat('0.###', ShapeCTM[1, 0]) + ',' + FormatFloat('0.###', ShapeCTM[1, 1])
-    + ':' + IntToStr(B) + ',' + IntToStr(G) + ',' + IntToStr(R) + ',' + IntToStr(A);
+  Key := AFontID + cKeyColon + IntToStr(AGlyphIdx)
+    + cKeyColon + FormatFloat(cFormatFloat3, ShapeCTM[0, 0]) + cKeyComma + FormatFloat(cFormatFloat3, ShapeCTM[0, 1])
+    + cKeyComma + FormatFloat(cFormatFloat3, ShapeCTM[1, 0]) + cKeyComma + FormatFloat(cFormatFloat3, ShapeCTM[1, 1])
+    + cKeyColon + IntToStr(B) + cKeyComma + IntToStr(G) + cKeyComma + IntToStr(R) + cKeyComma + IntToStr(A);
 
   I := FGlyphBitmapCacheKeys.IndexOf(Key);
   if I >= 0 then
@@ -940,9 +958,8 @@ begin
        (Color.FValues[1] = 0) and (Color.FValues[2] = 0) then
       Color := FState.FillColor;
     end;
-  A := Trunc(GlyphRun.Alpha * 255);
-  if A > 255 then A := 255;
-  if A <= 0 then
+  A := ClampAlpha255(GlyphRun.Alpha);
+  if A = 0 then
   begin
     if FDiagnostics then FDiagnosticsOutput.Add(Format('  GlyphRun: FAILED Alpha=%d', [A]));
     Exit;
@@ -1862,7 +1879,6 @@ var
   LDashCmd: TOFDLineDashCommand;
   LRendered, LFailed: Integer;
   LFatalError: Boolean;
-  LClipI, LClipMinX, LClipMinY, LClipMaxX, LClipMaxY: Integer;
   LSnapshot: ^TOFDRenderState;
 begin
   if (AWidthMM <= 0) or (AHeightMM <= 0) then
@@ -2064,7 +2080,7 @@ begin
   if (not Assigned(Cmd.CellContent)) or (Cmd.CellContent.CommandCount = 0) then
   begin
     TOFDCompositor.RasterizePathCommands(FSurface, Cmd.Path, FState.Transform, 200, 200, 200,
-      Trunc(Cmd.Alpha * 255));
+      ClampAlpha255(Cmd.Alpha));
     Exit;
   end;
 

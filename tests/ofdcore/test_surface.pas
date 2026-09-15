@@ -23,6 +23,7 @@ type
     procedure TestPremultipliedAlpha;
     procedure TestSourceOver;
     procedure TestFillRect;
+    procedure TestWritePixelRectClipping;
     procedure TestSourceOverColor;
   end;
 
@@ -125,6 +126,31 @@ begin
   CheckEquals(255, R);
   CheckEquals(0, G);
   CheckEquals(0, B);
+end;
+
+procedure TTestSurface.TestWritePixelRectClipping;
+var
+  B, G, R, A: Byte;
+begin
+  { Regression: X/Y/W/H were Byte, so the signed clipping branches were dead
+    and negative origins wrapped. They are Integer now. }
+  FSurface.Clear(0, 0, 0, 255);
+  FSurface.WritePixelRect(-10, -10, 30, 30, 0, 0, 255, 255);
+  FSurface.ReadPixel(10, 10, B, G, R, A);
+  CheckEquals(255, R, 'Negative origin must clip and fill (10,10)');
+  FSurface.ReadPixel(25, 25, B, G, R, A);
+  CheckEquals(0, R, 'Outside clipped width must stay untouched');
+
+  { Bottom-right overflow clips to a 5x5 corner. }
+  FSurface.WritePixelRect(95, 95, 10, 10, 0, 255, 0, 255);
+  FSurface.ReadPixel(97, 97, B, G, R, A);
+  CheckEquals(255, G, 'Overflowing rect must fill the in-bounds corner');
+
+  { Non-positive extents after clipping must be no-ops, not crashes. }
+  FSurface.WritePixelRect(10, 60, 0, 5, 0, 255, 255, 255);
+  FSurface.WritePixelRect(-5, 60, -3, 10, 0, 255, 255, 255);
+  FSurface.ReadPixel(0, 60, B, G, R, A);
+  CheckEquals(0, G, 'Zero/negative extent must draw nothing');
 end;
 
 procedure TTestSurface.TestSourceOverColor;

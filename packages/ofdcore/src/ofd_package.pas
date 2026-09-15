@@ -23,8 +23,17 @@ type
     FFileName: String;
     FExtractDir: String;
     FEntries: TStringList;
+    { Lazy case-insensitive index over FEntries for ASCII entry names, giving
+      O(1) HasEntry/OpenStream lookups instead of the O(N) linear scan. Only
+      ASCII names are indexed (OFD paths are ASCII in practice); non-ASCII
+      searches fall back to the exact linear scan, preserving CompareText
+      Unicode-fold semantics and first-match order. }
+    FNameIndex: TStringList;
+    FNameIndexValid: Boolean;
     procedure ReadCentralDirectory;
     function FindEntryIndex(const AName: String): Integer;
+    procedure EnsureNameIndex;
+    function IsAsciiName(const AName: String): Boolean;
     procedure CheckPathSecurity(const APath: String);
     procedure DeleteDir(const ADir: String);
     function GetExtractRootDir: String;
@@ -87,6 +96,11 @@ constructor TOFDPackage.Create;
 begin
   inherited Create;
   FEntries := TStringList.Create;
+  FNameIndex := TStringList.Create;
+  FNameIndex.Sorted := True;
+  FNameIndex.CaseSensitive := False;
+  FNameIndex.Duplicates := dupIgnore;
+  FNameIndexValid := False;
   FFileName := '';
   FExtractDir := '';
 end;
@@ -95,6 +109,7 @@ destructor TOFDPackage.Destroy;
 begin
   if IsOpen then
     Close;
+  FNameIndex.Free;
   FEntries.Free;
   inherited Destroy;
 end;
@@ -133,6 +148,8 @@ begin
   end;
   FFileName := '';
   FEntries.Clear;
+  FNameIndex.Clear;
+  FNameIndexValid := False;
 end;
 
 function TOFDPackage.GetExtractRootDir: String;
@@ -237,9 +254,14 @@ var
   TotalUncompressed: Int64;
 begin
   FEntries.Clear;
+  FNameIndex.Clear;
+  FNameIndexValid := False;
 
   if not FileExists(FFileName) then
+  begin
+    EnsureNameIndex;
     Exit;
+  end;
 
   { Phase 1: Create temp extraction directory in project _tmp/, cleanup stale }
   ExtractRoot := GetExtractRootDir;
@@ -312,6 +334,12 @@ begin
     raise EOFDPackageError.CreateFmt(
       'ZIP 条目过多，可能存在 Zip Bomb 攻击 (条目数: %d, 上限: %d)',
       [FEntries.Count, cMaxZipEntries]);
+
+  { Build the name index eagerly here (single-threaded open path). Lookups on a
+    shared package can happen from the render worker thread concurrently with
+    the main thread, so FindEntryIndex must stay read-only; lazy index building
+    inside a lookup would be a data race. }
+  EnsureNameIndex;
 end;
 
 { Extract a single archive entry (and its parent directories) to the temp dir
@@ -388,23 +416,72 @@ begin
   Result := FEntries;
 end;
 
-function TOFDPackage.FindEntryIndex(const AName: String): Integer;
+function TOFDPackage.IsAsciiName(const AName: String): Boolean;
 var
   I: Integer;
+begin
+  for I := 1 to Length(AName) do
+    if Ord(AName[I]) > $7F then
+      Exit(False);
+  Result := True;
+end;
+
+{ Build (once) a case-insensitive sorted index of ASCII entry names. Entries
+  are added in FEntries order with dupIgnore, so the stored object is the FIRST
+  matching index, matching the original linear scan's first-match semantics. }
+procedure TOFDPackage.EnsureNameIndex;
+var
+  I: Integer;
+  EntryName: String;
+begin
+  if FNameIndexValid then
+    Exit;
+  FNameIndex.Clear;
+  for I := 0 to FEntries.Count - 1 do
+  begin
+    EntryName := FEntries[I];
+    if IsAsciiName(EntryName) then
+      FNameIndex.AddObject(EntryName, TObject(PtrInt(I)));
+  end;
+  FNameIndexValid := True;
+end;
+
+function TOFDPackage.FindEntryIndex(const AName: String): Integer;
+var
+  I, P, Idx: Integer;
   EntryName, SearchName: String;
 begin
   SearchName := AName;
   { Remove trailing slash if present }
   if (Length(SearchName) > 0) and (SearchName[Length(SearchName)] = '/') then
     SearchName := Copy(SearchName, 1, Length(SearchName) - 1);
-  
+
+  { Fast path for ASCII names (all OFD paths in practice): a miss is a true
+    miss because an ASCII search can never CompareText-match a non-ASCII entry,
+    and a hit is verified with CompareText before returning. The index is built
+    in ReadCentralDirectory (Open); lookups never mutate it, so concurrent
+    readers from the render worker are safe. }
+  if FNameIndexValid and IsAsciiName(SearchName) then
+  begin
+    P := FNameIndex.IndexOf(SearchName);
+    if P < 0 then
+      Exit(-1);
+    Idx := PtrInt(FNameIndex.Objects[P]);
+    if (Idx >= 0) and (Idx < FEntries.Count) and
+       (CompareText(FEntries[Idx], SearchName) = 0) then
+      Exit(Idx);
+    { Defensive: index disagreement cannot happen for ASCII, but fall through. }
+  end;
+
+  { Exact linear scan fallback: used for non-ASCII searches (Unicode case
+    folding) and defensively. Preserves trailing-slash strip and CompareText. }
   for I := 0 to FEntries.Count - 1 do
   begin
     EntryName := FEntries[I];
     { Remove trailing slash from entry name }
     if (Length(EntryName) > 0) and (EntryName[Length(EntryName)] = '/') then
       EntryName := Copy(EntryName, 1, Length(EntryName) - 1);
-    
+
     if CompareText(EntryName, SearchName) = 0 then
       Exit(I);
   end;

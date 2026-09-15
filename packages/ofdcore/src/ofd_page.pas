@@ -5,6 +5,10 @@ interface
 uses
   Classes, SysUtils, Math, Contnrs, ofd_document, ofd_xml, ofd_types, ofd_errors;
 
+{ Parse an OFD Alpha attribute (0..255) into a Byte, clamping out-of-range and
+  non-numeric values. Valid values 0..255 are preserved exactly; negative -> 0,
+  >255 -> 255, missing/invalid -> 255. Fixes prior Byte truncation wrapping. }
+function OFDClampAlpha(const ARawAlpha: String): Byte;
 
 type
   { 动态 Double 数组类型 }
@@ -438,6 +442,19 @@ implementation
 { Helper: extract local name from qualified name with namespace }
 { ExtractLocalName moved to ofd_types.pas }
 
+function OFDClampAlpha(const ARawAlpha: String): Byte;
+var
+  V: Integer;
+begin
+  V := StrToIntDef(ARawAlpha, 255);
+  if V < 0 then
+    Result := 0
+  else if V > 255 then
+    Result := 255
+  else
+    Result := Byte(V);
+end;
+
 { TOFDTextCode }
 
 constructor TOFDTextCode.Create; overload;
@@ -677,7 +694,7 @@ var
   LocalName: String;
   Segs: TObjectList;
   Seg, ColorNode: TOFDXMLNode;
-  PosStr, ColorStr: String;
+  ColorStr: String;
   Parts: TStringList;
   Stop: TOFDShadingStop;
   I: Integer;
@@ -1056,7 +1073,6 @@ end;
 procedure TOFDAnnotation.ParseAppearance(const ANode: TOFDXMLNode);
 var
   BoundaryStr, PathStr: String;
-  Parts: TStringList;
   SigNode: TOFDXMLNode;
 begin
   if not Assigned(ANode) then Exit;
@@ -1657,7 +1673,7 @@ begin
       end;
     end;
 
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
   end;
 
   FObjects.Add(CompObj);
@@ -1721,7 +1737,7 @@ begin
       end;
     end;
 
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
   end;
 
   ATargetList.Add(CompObj);
@@ -1949,7 +1965,7 @@ begin
     FStrokeColor := ANode.GetAttribute('StrokeColor');
     FStrokeColorSet := FStrokeColor <> '';
     FHScale := StrToFloatDef(ANode.GetAttribute('HScale'), 1);
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
     FReadDirection := StrToIntDef(ANode.GetAttribute('ReadDirection'), 0);
     FCharDirection := StrToIntDef(ANode.GetAttribute('CharDirection'), 0);
     FLetterSpacing := StrToFloatDef(ANode.GetAttribute('LetterSpacing'), 0);
@@ -2266,7 +2282,7 @@ begin
       Ref := ImageRefNode.GetAttribute('xlink:href');
       if Ref <> '' then FImageId := Ref;
     end;
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
   end;
 
   FObjects.Add(ImgObj);
@@ -2296,7 +2312,7 @@ begin
     FStroke := ANode.GetAttribute('Stroke') <> 'false';
     FBlendMode := ANode.GetAttribute('BlendMode');
     { GAP-7: Parse Alpha attribute }
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
     { GAP-6: Parse FillRule attribute }
     FFillRule := ANode.GetAttribute('FillRule');
     if FFillRule = '' then
@@ -2547,8 +2563,6 @@ procedure TOFDPage.ParseGroupObject(const ANode: TOFDXMLNode); overload;
 var
   GroupObj: TOFDGroupObject;
   OldCount: Integer;
-  I: Integer;
-  Child: TObject;
 begin
   GroupObj := TOFDGroupObject.Create(ANode.GetAttribute('ID'));
   { Parse Group's boundary and CTM }
@@ -2781,7 +2795,6 @@ var
   CTMStr, BoundStr: String;
   Parts: TStringList;
   PathNode: TOFDXMLNode;
-  DiagFile: TextFile;
 begin
   TxtObj := TOFDTextObject.Create(ANode.GetAttribute('ID'));
   with TxtObj do
@@ -2852,7 +2865,7 @@ begin
     FStrokeColor := ANode.GetAttribute('StrokeColor');
     FStrokeColorSet := FStrokeColor <> '';
     FHScale := StrToFloatDef(ANode.GetAttribute('HScale'), 1);
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
 
     ParseTextCodes(ANode, TxtObj);
   end;
@@ -2927,7 +2940,7 @@ begin
       Ref := ImageRefNode.GetAttribute('xlink:href');
       if Ref <> '' then FImageId := Ref;
     end;
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
   end;
 
   if Assigned(ALayer) then
@@ -2961,7 +2974,7 @@ begin
     FStroke := ANode.GetAttribute('Stroke') <> 'false';
     FBlendMode := ANode.GetAttribute('BlendMode');
     { GAP-7: Parse Alpha attribute }
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
     { GAP-6: Parse FillRule attribute }
     FFillRule := ANode.GetAttribute('FillRule');
     if FFillRule = '' then
@@ -3171,7 +3184,7 @@ begin
       end;
     end;
 
-    FAlpha := StrToIntDef(ANode.GetAttribute('Alpha'), 255);
+    FAlpha := OFDClampAlpha(ANode.GetAttribute('Alpha'));
   end;
 
   if Assigned(ALayer) then

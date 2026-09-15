@@ -13,7 +13,7 @@ unit ofd_surface;
 interface
 
 uses
-  Classes, SysUtils, Types, Math, fpimage, fpreadpng, fpreadjpeg, fpreadbmp,
+  Classes, SysUtils, Types, fpimage, fpreadpng, fpreadjpeg, fpreadbmp,
   fpreadgif;
 
 type
@@ -40,7 +40,7 @@ type
     procedure Clear(B, G, R, A: Byte);
     function PixelAt(X, Y: Integer): PByte;
     procedure WritePixel(X, Y, B, G, R, A: Byte);
-    procedure WritePixelRect(X, Y, W, H, B, G, R, A: Byte);
+    procedure WritePixelRect(X, Y, W, H: Integer; B, G, R, A: Byte);
     procedure ReadPixel(X, Y: Integer; out B, G, R, A: Byte);
     procedure WritePremulPixel(X, Y: Integer; B, G, R, A: Byte);
     procedure PremultiplyPixel(X, Y: Integer);
@@ -177,7 +177,7 @@ begin
   P[3] := A;
 end;
 
-procedure TOFDSurface.WritePixelRect(X, Y, W, H, B, G, R, A: Byte);
+procedure TOFDSurface.WritePixelRect(X, Y, W, H: Integer; B, G, R, A: Byte);
 var
   Y2, X2: Integer;
   P: PByte;

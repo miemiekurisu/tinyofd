@@ -8,9 +8,9 @@ uses
   Classes, SysUtils, Forms, Controls, StdCtrls, Dialogs, ExtCtrls, Menus,
   ComCtrls, Buttons, Graphics, Types, LCLType, LCLIntf, INIFiles, Clipbrd,
   FileUtil, Contnrs,
-  fpimage, Messages, Printers, LazLogger,
-  ofdcore, ofd_document, ofd_page_view, ofd_thumbnail_view,
-  ofd_find_bar, ofd_document_view, ofd_text_search, ofd_config,
+  fpimage, Printers, LazLogger,
+  ofd_document, ofd_page_view,
+  ofd_document_view, ofd_text_search, ofd_config,
   ofd_goto_dialog, ofd_tab_strip
 {$IFDEF DARWIN}
   , FPMagnifyBridge
@@ -117,6 +117,13 @@ type
     FToolbarZoomOutBtn: TSpeedButton;
     FThumbsPanel: TScrollBox;
     FThumbsBtnsList: TList;
+  { UpdateThumbnails rebuilds every thumbnail button and renders up to 3 pages
+    synchronously through FPageView. It is called on every tab activation and
+    every file load - including while the panel is hidden, where the work is
+    invisible - so remember what the current buttons represent. }
+  FThumbsRenderedFor: TOFDDocument;
+  FThumbsRenderedPages: Integer;
+  FThumbsRenderedWidth: Integer;
     FFindBar: TPanel;
     FFindEdit: TEdit;
     FFindPrevBtn: TSpeedButton;
@@ -702,9 +709,15 @@ begin
   Canvas.StretchDraw(DstRect, FThumb);
   if FDown then
   begin
+    { LCL Rectangle() FILLS with the current brush - with the white background
+      brush still selected it painted the whole thumbnail over in white, which
+      is why exactly the current page's thumbnail looked blank. Draw the
+      highlight as a border only. }
+    Canvas.Brush.Style := bsClear;
     Canvas.Pen.Color := clHighlight;
     Canvas.Pen.Width := 2;
     Canvas.Rectangle(0, 0, Width - 1, Height - 1);
+    Canvas.Brush.Style := bsSolid;
   end;
 end;
 
@@ -753,12 +766,10 @@ begin
   { Register the bundled Material Icons font so the toolbar glyphs render. }
   RegisterBundledMaterialIcons;
 {$ENDIF}
-  try
-    LoadSettings;
-  except
-    on E: Exception do
-      raise Exception.Create('LoadSettings: ' + E.Message);
-  end;
+  { Defaults FIRST: LoadSettings reads the ini inside an `if FileExists` and
+    only then overrides these. The old order (defaults assigned AFTER
+    LoadSettings) silently wiped the persisted Zoom/ShowThumbs/Continuous/
+    ShowToolbar/Rotation settings on every start. }
   FDocument := nil;
   FCurrentPage := 0;
   FZoomLevel := 1.0;
@@ -772,6 +783,12 @@ begin
   FFileName := '';
   FFindText := '';
   FRotationAngle := 0;
+  try
+    LoadSettings;
+  except
+    on E: Exception do
+      raise Exception.Create('LoadSettings: ' + E.Message);
+  end;
 
   Width := 900;
   Height := 700;
@@ -1094,9 +1111,11 @@ begin
 end;
 
 procedure TViewerMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+{$IFDEF DARWIN}
 var
   I: Integer;
   Tab: TOFDViewerTab;
+{$ENDIF}
 begin
   CanClose := True;
 
@@ -1787,7 +1806,9 @@ begin
   FThumbsPanel.Align := alLeft;
   FThumbsPanel.Width := 150;
   FThumbsPanel.Color := $E0E0E0;
-  FThumbsPanel.Visible := False;
+  { Restore the persisted sidebar state (LoadSettings already ran in
+    FormCreate; the old hard-coded False made the ShowThumbs setting dead). }
+  FThumbsPanel.Visible := FShowThumbs;
 end;
 
 procedure TViewerMainForm.SetupShortcuts;
@@ -1886,7 +1907,36 @@ var
   OldZoomMode: TOFDZoomMode;
   ThumbW, ThumbH: Integer;
   MaxThumbsToRender: Integer;
+  AssignedDoc: Boolean;
 begin
+  { Panel hidden: nothing to refresh visibly, and the rebuild below would render
+    pages through the shared FPageView (changing PageIndex/Zoom) for a panel
+    nobody can see. Leave the existing buttons in place - they are rebuilt as
+    soon as the panel is shown again or a different document is loaded. }
+  if not FThumbsPanel.Visible then
+    Exit;
+
+  { Up to date for this document at this panel width: ActivateTab fires this on
+    every tab switch, and a rebuild re-renders three pages synchronously, which
+    is exactly the stutter you get when flipping between open documents. }
+  AssignedDoc := Assigned(FDocument);
+  if AssignedDoc and (FDocument = FThumbsRenderedFor) and
+     (FThumbsRenderedPages = FDocument.PageCount) and
+     (FThumbsRenderedWidth = FThumbsPanel.Width) then
+  begin
+    { The buttons still show the right pages, but the highlighted page may not
+      be current (that used to come for free from the rebuild - e.g. changing
+      page while the panel was hidden, then opening it). Refresh the highlight
+      only: no page is rendered. }
+    for I := 0 to FThumbsBtnsList.Count - 1 do
+    begin
+      Btn := TThumbButton(FThumbsBtnsList[I]);
+      Btn.Down := (Btn.PageIndex = FCurrentPage);
+      Btn.Invalidate;
+    end;
+    Exit;
+  end;
+
   { Detach from the panel BEFORE freeing so the panel never double-frees a
     button (fixes intermittent access violation in TThumbButton.Destroy when
     a stale button pointer is reused/freed). }
@@ -1899,7 +1949,14 @@ begin
   end;
   FThumbsBtnsList.Clear;
 
-  if not Assigned(FDocument) then Exit;
+  { Whatever the buttons now show corresponds to this document from here on. }
+  FThumbsRenderedFor := FDocument;
+  FThumbsRenderedPages := 0;
+  FThumbsRenderedWidth := FThumbsPanel.Width;
+
+  if not AssignedDoc then Exit;
+
+  FThumbsRenderedPages := FDocument.PageCount;
 
   ThumbW := FThumbsPanel.Width - 15;
   if ThumbW <= 0 then ThumbW := 100;
@@ -2179,6 +2236,15 @@ begin
   if not Assigned(FDocument) then Exit;
 
   if not Assigned(FPageView.Page) then Exit;
+  { The fit-to-paper scale divides by the rendered page size. A page that failed
+    to lay out reports 0, and 0 would make the division Inf -> Round() raises a
+    range error inside the spooled job (leaving a half-printed page). Bail out
+    before BeginDoc so no empty/partial job is sent to the printer. }
+  if (FPageView.ZoomedWidth <= 0) or (FPageView.ZoomedHeight <= 0) then
+  begin
+    FStatusBar.SimpleText := '打印失败: 页面尺寸无效';
+    Exit;
+  end;
   Printer.BeginDoc;
   try
     PW := Printer.PageWidth;
@@ -2773,6 +2839,22 @@ begin
   Idx := FTabList.IndexOf(ATab);
   if Idx < 0 then Exit;
   WasActive := (FActiveTab = ATab);
+  {$IFDEF DARWIN}
+  { The tab owns its views: FTabList.Delete frees them, so a magnify handler
+    still pointing at this tab's PageView/DocView would leave FLastMagnifyView
+    dangling and the next view switch would dereference freed memory. Uninstall
+    while the handle is still valid (same pattern as FormDestroy). }
+  if Assigned(ATab) then
+  begin
+    if (FLastMagnifyView = ATab.PageView) or (FLastMagnifyView = ATab.DocView) then
+    begin
+      if (FLastMagnifyView is TWinControl) and
+         TWinControl(FLastMagnifyView).HandleAllocated then
+        FPUninstallMagnifyHandler(Pointer(TWinControl(FLastMagnifyView).Handle));
+      FLastMagnifyView := nil;
+    end;
+  end;
+  {$ENDIF}
   if WasActive then
   begin
     { Detach active pointers before the tab is freed. }

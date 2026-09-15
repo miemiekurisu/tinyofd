@@ -62,6 +62,13 @@ type
 
     { Regression: broken font data must resolve to nil, not a blank face. }
     procedure TestFT2Engine_BadFontReturnsNil;
+
+    { Audit: malformed out-of-range color/alpha must clamp, not wrap in Byte }
+    procedure TestColorComponentOutOfRangeClamped;
+    procedure TestPathAlphaOutOfRangeClamped;
+    procedure TestGroupAlphaOutOfRangeClamped;
+    procedure TestAxialShadingOutOfRangeColorClamped;
+    procedure TestAxialShadingNegativeAlphaClamped;
   end;
 
 implementation
@@ -1395,6 +1402,213 @@ begin
       'Garbage bytes must not produce a usable face object');
   finally
     Engine.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestColorComponentOutOfRangeClamped;
+var
+  Service: TOFDRenderService;
+  DL: TOFDDisplayList;
+  Surface: TOFDSurface;
+  B, G, R, A: Byte;
+  M: TOFDMatrix;
+  Path: TOFDPathCommands;
+begin
+  { Malformed color components (R=2.0, G=-1.0) must clamp to 255/0. Before the
+    fix the Byte result wrapped (510 -> $FE-ish) or aborted range checks. }
+  Service := TOFDRenderService.Create;
+  try
+    Service.Diagnostics := False;
+    DL := TOFDDisplayList.Create;
+    try
+      FillChar(M, SizeOf(M), 0);
+      M[0,0] := 1; M[1,1] := 1; M[2,2] := 1;
+      DL.AddTransform(M);
+      SetLength(Path, 5);
+      Path[0].Cmd := pcMoveTo; Path[0].X := 1; Path[0].Y := 1;
+      Path[1].Cmd := pcLineTo; Path[1].X := 5; Path[1].Y := 1;
+      Path[2].Cmd := pcLineTo; Path[2].X := 5; Path[2].Y := 5;
+      Path[3].Cmd := pcLineTo; Path[3].X := 1; Path[3].Y := 5;
+      Path[4].Cmd := pcClosePath;
+      DL.AddPath(Path, frNonZero, RGBColor(2.0, -1.0, 0.5), 1.0);
+    finally
+      Surface := Service.RenderDisplayList(DL, 20, 20, 96, 1);
+      DL.Free;
+    end;
+    try
+      Surface.ReadPixel(11, 11, B, G, R, A);
+      CheckTrue(R >= 250, Format('Out-of-range R=2.0 must clamp to 255, got %d', [R]));
+      CheckTrue(G <= 5, Format('Out-of-range G=-1.0 must clamp to 0, got %d', [G]));
+      CheckTrue(Abs(B - 128) <= 2, Format('B=0.5 should stay mid-gray, got %d', [B]));
+    finally
+      Surface.Free;
+    end;
+  finally
+    Service.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestPathAlphaOutOfRangeClamped;
+var
+  Service: TOFDRenderService;
+  DL: TOFDDisplayList;
+  Surface: TOFDSurface;
+  B, G, R, A: Byte;
+  M: TOFDMatrix;
+  Path: TOFDPathCommands;
+
+  procedure AddRect(const AX, AY: Double);
+  begin
+    SetLength(Path, 5);
+    Path[0].Cmd := pcMoveTo; Path[0].X := AX; Path[0].Y := AY;
+    Path[1].Cmd := pcLineTo; Path[1].X := AX + 4; Path[1].Y := AY;
+    Path[2].Cmd := pcLineTo; Path[2].X := AX + 4; Path[2].Y := AY + 4;
+    Path[3].Cmd := pcLineTo; Path[3].X := AX; Path[3].Y := AY + 4;
+    Path[4].Cmd := pcClosePath;
+  end;
+
+begin
+  { Alpha >1 must clamp to opaque (was dead-code clamp, wrapped). }
+  Service := TOFDRenderService.Create;
+  try
+    Service.Diagnostics := False;
+    DL := TOFDDisplayList.Create;
+    try
+      FillChar(M, SizeOf(M), 0);
+      M[0,0] := 1; M[1,1] := 1; M[2,2] := 1;
+      DL.AddTransform(M);
+      AddRect(1, 1);
+      DL.AddPath(Path, frNonZero, RGBColor(1, 0, 0), 2.0);
+      AddRect(1, 8);
+      DL.AddPath(Path, frNonZero, RGBColor(0, 1, 0), -0.5);
+    finally
+      Surface := Service.RenderDisplayList(DL, 20, 20, 96, 1);
+      DL.Free;
+    end;
+    try
+      Surface.ReadPixel(11, 11, B, G, R, A);
+      CheckTrue(R > 200, Format('Alpha 2.0 must clamp to opaque red, R=%d', [R]));
+      CheckTrue(B < 50, Format('Alpha 2.0 must not fade, B=%d', [B]));
+      Surface.ReadPixel(11, 40, B, G, R, A);
+      CheckTrue(R > 250, Format('Negative alpha must draw nothing, R=%d', [R]));
+    finally
+      Surface.Free;
+    end;
+  finally
+    Service.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestGroupAlphaOutOfRangeClamped;
+var
+  Service: TOFDRenderService;
+  DL: TOFDDisplayList;
+  Surface: TOFDSurface;
+  B, G, R, A: Byte;
+  M: TOFDMatrix;
+  Path: TOFDPathCommands;
+begin
+  { GroupAlpha >1 wrapped through the Byte variable; it must behave as 1.0. }
+  Service := TOFDRenderService.Create;
+  try
+    Service.Diagnostics := False;
+    DL := TOFDDisplayList.Create;
+    try
+      DL.AddBeginGroup(2.0, bmNormal, True);
+      FillChar(M, SizeOf(M), 0);
+      M[0,0] := 1; M[1,1] := 1; M[2,2] := 1;
+      DL.AddTransform(M);
+      SetLength(Path, 5);
+      Path[0].Cmd := pcMoveTo; Path[0].X := 1; Path[0].Y := 1;
+      Path[1].Cmd := pcLineTo; Path[1].X := 5; Path[1].Y := 1;
+      Path[2].Cmd := pcLineTo; Path[2].X := 5; Path[2].Y := 5;
+      Path[3].Cmd := pcLineTo; Path[3].X := 1; Path[3].Y := 5;
+      Path[4].Cmd := pcClosePath;
+      DL.AddPath(Path, frNonZero, RGBColor(1, 0, 0), 1.0);
+      DL.AddEndGroup;
+    finally
+      Surface := Service.RenderDisplayList(DL, 20, 20, 96, 1);
+      DL.Free;
+    end;
+    try
+      Surface.ReadPixel(11, 11, B, G, R, A);
+      CheckTrue(R > 200, Format('Group alpha 2.0 must clamp opaque, R=%d', [R]));
+      CheckTrue(B < 50, Format('Group alpha 2.0 must not fade, B=%d', [B]));
+    finally
+      Surface.Free;
+    end;
+  finally
+    Service.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestAxialShadingOutOfRangeColorClamped;
+var
+  S: TOFDSurface;
+  Commands: TOFDPathCommands;
+  CTM: TOFDMatrix;
+  ColorMap: array of TOFDShadingStop;
+  B, G, R, A: Byte;
+begin
+  { Single-stop color map with malformed components (R=2.0, G=-1.0): the raw
+    Trunc value wrapped through the Byte fields of TOFDGradientColor. }
+  S := TOFDSurface.Create(100, 100);
+  try
+    S.Clear(255, 255, 255, 255);
+    SetLength(Commands, 5);
+    Commands[0].Cmd := pcMoveTo; Commands[0].X := 10; Commands[0].Y := 10;
+    Commands[1].Cmd := pcLineTo; Commands[1].X := 90; Commands[1].Y := 10;
+    Commands[2].Cmd := pcLineTo; Commands[2].X := 90; Commands[2].Y := 90;
+    Commands[3].Cmd := pcLineTo; Commands[3].X := 10; Commands[3].Y := 90;
+    Commands[4].Cmd := pcClosePath;
+    FillChar(CTM, SizeOf(CTM), 0);
+    CTM[0,0] := 1; CTM[1,1] := 1; CTM[2,2] := 1;
+    SetLength(ColorMap, 1);
+    ColorMap[0].Position := 0;
+    ColorMap[0].Color := RGBColor(2.0, 0.5, -1.0);
+    TOFDCompositor.FillPathAxialGradient(S, Commands, CTM, 10, 50, 90, 50,
+      ColorMap, 1.0);
+    S.ReadPixel(50, 50, B, G, R, A);
+    CheckTrue(R >= 250, Format('Shading R=2.0 must clamp to 255, got %d', [R]));
+    CheckTrue(B <= 5, Format('Shading B=-1.0 must clamp to 0, got %d', [B]));
+    CheckTrue(Abs(G - 127) <= 3, Format('Shading G=0.5 must stay ~127, got %d', [G]));
+  finally
+    S.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestAxialShadingNegativeAlphaClamped;
+var
+  S: TOFDSurface;
+  Commands: TOFDPathCommands;
+  CTM: TOFDMatrix;
+  ColorMap: array of TOFDShadingStop;
+  B, G, R, A: Byte;
+begin
+  { Negative gradient alpha must clamp to 0 and draw nothing (wrapped to a
+    faint visible alpha=1-ish value before the fix). }
+  S := TOFDSurface.Create(100, 100);
+  try
+    S.Clear(255, 255, 255, 255);
+    SetLength(Commands, 5);
+    Commands[0].Cmd := pcMoveTo; Commands[0].X := 10; Commands[0].Y := 10;
+    Commands[1].Cmd := pcLineTo; Commands[1].X := 90; Commands[1].Y := 10;
+    Commands[2].Cmd := pcLineTo; Commands[2].X := 90; Commands[2].Y := 90;
+    Commands[3].Cmd := pcLineTo; Commands[3].X := 10; Commands[3].Y := 90;
+    Commands[4].Cmd := pcClosePath;
+    FillChar(CTM, SizeOf(CTM), 0);
+    CTM[0,0] := 1; CTM[1,1] := 1; CTM[2,2] := 1;
+    SetLength(ColorMap, 1);
+    ColorMap[0].Position := 0;
+    ColorMap[0].Color := RGBColor(1.0, 0.0, 0.0);
+    TOFDCompositor.FillPathAxialGradient(S, Commands, CTM, 10, 50, 90, 50,
+      ColorMap, -1.0);
+    S.ReadPixel(50, 50, B, G, R, A);
+    CheckTrue(B = 255, Format('Negative shading alpha must draw nothing, B=%d', [B]));
+    CheckTrue(G = 255, Format('Negative shading alpha must draw nothing, G=%d', [G]));
+    CheckTrue(R = 255, Format('Negative shading alpha must draw nothing, R=%d', [R]));
+  finally
+    S.Free;
   end;
 end;
 

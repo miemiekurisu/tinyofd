@@ -32,6 +32,11 @@ type
     procedure TestIsOpen_InitialState;
     procedure TestExtractDir_UniqueAcrossOpens;
     procedure TestExtractDir_CleanedAfterClose;
+    procedure TestHasEntry_CaseInsensitive;
+    procedure TestHasEntry_TrailingSlash;
+    procedure TestHasEntry_Missing;
+    procedure TestOpenStream_CaseInsensitive;
+    procedure TestHasEntry_AllRealEntriesResolve;
   end;
 
 implementation
@@ -412,6 +417,102 @@ begin
     Pkg.Close;
     CheckFalse(DirectoryExists(Dir), 'extract dir removed after close');
     CheckEquals('', Pkg.ExtractDir, 'extract dir name cleared after close');
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestHasEntry_CaseInsensitive;
+var
+  Pkg: TOFDPackage;
+begin
+  { Regression for the lazy ASCII lookup index: case-insensitive matching
+    must be preserved for ASCII names (the fast path). }
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    CheckTrue(Pkg.HasEntry('OFD.xml'), 'exact case');
+    CheckTrue(Pkg.HasEntry('ofd.xml'), 'lowercase');
+    CheckTrue(Pkg.HasEntry('OFD.XML'), 'uppercase');
+    CheckTrue(Pkg.HasEntry('OfD.XmL'), 'mixed case');
+    Pkg.Close;
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestHasEntry_TrailingSlash;
+var
+  Pkg: TOFDPackage;
+begin
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    CheckTrue(Pkg.HasEntry('OFD.xml/'), 'trailing slash stripped then matched');
+    Pkg.Close;
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestHasEntry_Missing;
+var
+  Pkg: TOFDPackage;
+begin
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    CheckFalse(Pkg.HasEntry('definitely_absent_entry.xyz'), 'missing ascii name');
+    CheckFalse(Pkg.HasEntry('OFD.xml2'), 'prefix but not equal');
+    Pkg.Close;
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestOpenStream_CaseInsensitive;
+var
+  Pkg: TOFDPackage;
+  S: TStream;
+begin
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    S := Pkg.OpenStream('ofD.xMl');
+    try
+      CheckTrue(S.Size > 0, 'open stream via mixed-case lookup');
+    finally
+      S.Free;
+    end;
+    Pkg.Close;
+  finally
+    Pkg.Free;
+  end;
+end;
+
+procedure TTestOFDPackageExtended.TestHasEntry_AllRealEntriesResolve;
+var
+  Pkg: TOFDPackage;
+  L: TStringList;
+  I: Integer;
+  E: String;
+begin
+  { Every real entry must resolve via HasEntry (ASCII fast path or fallback),
+    and case-flipped names must resolve too, proving the lazy index reproduces
+    the original linear scan for present entries. }
+  Pkg := TOFDPackage.Create;
+  try
+    Pkg.Open(TestFile);
+    L := Pkg.GetEntries;
+    CheckTrue(L.Count > 0, 'fixture has entries');
+    for I := 0 to L.Count - 1 do
+    begin
+      E := L[I];
+      CheckTrue(Pkg.HasEntry(E), 'exact entry resolves: ' + E);
+      CheckTrue(Pkg.HasEntry(UpperCase(E)), 'upper-case entry resolves: ' + E);
+      CheckTrue(Pkg.HasEntry(LowerCase(E)), 'lower-case entry resolves: ' + E);
+    end;
+    Pkg.Close;
   finally
     Pkg.Free;
   end;

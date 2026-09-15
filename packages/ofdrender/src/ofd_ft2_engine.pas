@@ -16,7 +16,7 @@ interface
 
 uses
   Classes, SysUtils,
-  ofd_types, ofd_font_engine_intf, ofd_ttf_glyf, freetypeh, ofd_ft2_api;
+  ofd_font_engine_intf, ofd_ttf_glyf, freetypeh, ofd_ft2_api;
 
 type
   { FT2-backed font face }
@@ -67,7 +67,6 @@ implementation
 const
   FT_LOAD_NO_SCALE  = $0001;
   FT_LOAD_NO_HINTING = $0002;
-  FT_LOAD_RENDER    = $0004;
   FT_LOAD_NO_BITMAP = $0008;
   FT_GLYPH_FORMAT_OUTLINE = $6F75746C; { 'outl' }
 

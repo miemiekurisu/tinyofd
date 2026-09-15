@@ -1135,7 +1135,7 @@ class procedure TOFDCompositor.RasterizePathCommands(Dst: TOFDSurface;
   const Commands: TOFDPathCommands; const CTM: TOFDMatrix;
   B, G, R, A: Byte);
 var
-  I, CmdIdx, NumContours, NumPts, MinX, MaxX, MinY, MaxY: Integer;
+  I, CmdIdx, NumPts, MinX, MaxX, MinY, MaxY: Integer;
   ScanY, SpanStart, SpanEnd, PX: Integer;
   MaxCrossings: Integer;
   HasContent: Boolean;
@@ -1229,7 +1229,6 @@ begin
   if Length(Commands) = 0 then Exit;
   if A = 0 then Exit;
 
-  NumContours := 0;
   CurrX := 0; CurrY := 0;
   PrevX := 0; PrevY := 0;
   SetLength(AllContours, 0);
@@ -1882,7 +1881,7 @@ class function TOFDCompositor.RasterizePathToMask(
   const Commands: TOFDPathCommands; const CTM: TOFDMatrix;
   Width, Height: Integer): TBytes;
 var
-  I, CmdIdx, NumContours, NumPts: Integer;
+  I, CmdIdx, NumPts: Integer;
   MinX, MaxX, MinY, MaxY: Integer;
   ScanY, SpanStart, SpanEnd, CX: Integer;
   MaxCrossings: Integer;
@@ -2217,6 +2216,16 @@ begin
   end;
 end;
 
+{ Helper: clamp an Int64 color conversion into Byte range. Malformed shading
+  color maps can carry components >1 or <0; the raw Trunc value wraps when
+  assigned to the Byte fields of TOFDGradientColor. }
+function ClampToByte(AValue: Int64): Byte;
+begin
+  if AValue > 255 then Exit(255);
+  if AValue < 0 then Exit(0);
+  Result := AValue;
+end;
+
 { Helper: interpolate a color from the shading color map at parameter T (0..1).
   Returns premultiplied B, G, R components (already multiplied by A/255). }
 function InterpolateShadingColor(const ColorMap: array of TOFDShadingStop;
@@ -2256,9 +2265,9 @@ begin
     else
       Rv := 0; Gv := 0; Bv := 0;
     end;
-    Result.B := Trunc(Bv * 255 * A / 255);
-    Result.G := Trunc(Gv * 255 * A / 255);
-    Result.R := Trunc(Rv * 255 * A / 255);
+    Result.B := ClampToByte(Trunc(Bv * 255 * A / 255));
+    Result.G := ClampToByte(Trunc(Gv * 255 * A / 255));
+    Result.R := ClampToByte(Trunc(Rv * 255 * A / 255));
     Exit;
   end;
 
@@ -2308,9 +2317,9 @@ begin
       Gv := G0 + (G1 - G0) * F;
       Bv := B0 + (B1 - B0) * F;
 
-      Result.B := Trunc(Bv * 255 * A / 255);
-      Result.G := Trunc(Gv * 255 * A / 255);
-      Result.R := Trunc(Rv * 255 * A / 255);
+      Result.B := ClampToByte(Trunc(Bv * 255 * A / 255));
+      Result.G := ClampToByte(Trunc(Gv * 255 * A / 255));
+      Result.R := ClampToByte(Trunc(Rv * 255 * A / 255));
       Exit;
     end;
   end;
@@ -2328,7 +2337,7 @@ class procedure TOFDCompositor.FillPathAxialGradient(Dst: TOFDSurface;
   StartX, StartY, EndX, EndY: Double;
   const ColorMap: array of TOFDShadingStop; Alpha: Double);
 var
-  I, CmdIdx, NumContours, NumPts: Integer;
+  I, CmdIdx, NumPts: Integer;
   MinX, MaxX, MinY, MaxY: Integer;
   ScanY, SpanStart, SpanEnd, PX: Integer;
   MaxCrossings: Integer;
@@ -2339,7 +2348,7 @@ var
   Tx, Ty, Tw: Double;
   Segments: array of TOFDPoint;
   P: PByte;
-  A: Byte;
+  A: Integer;
   InvSrcA: Integer;
   Ytest: Double;
   Y1, Y2, X1, X2v, DY, IX: Double;
@@ -2406,6 +2415,8 @@ begin
   if not Assigned(Dst) or not Assigned(Dst.Pixels) then Exit;
   if Length(Commands) = 0 then Exit;
   A := Trunc(Alpha * 255);
+  if A > 255 then A := 255
+  else if A < 0 then A := 0;
   if A = 0 then Exit;
   if Length(ColorMap) = 0 then Exit;
 
@@ -2424,7 +2435,6 @@ begin
   GL2 := Sqr(GL);
 
   { Parse path commands into contours (same as RasterizePathCommands) }
-  NumContours := 0;
   CurrX := 0; CurrY := 0;
   PrevX := 0; PrevY := 0;
   SetLength(AllContours, 0);
@@ -2655,7 +2665,7 @@ class procedure TOFDCompositor.FillPathRadialGradient(Dst: TOFDSurface;
   InnerCX, InnerCY, InnerR, OuterCX, OuterCY, OuterR: Double;
   const ColorMap: array of TOFDShadingStop; Alpha: Double);
 var
-  I, CmdIdx, NumContours, NumPts: Integer;
+  I, CmdIdx, NumPts: Integer;
   MinX, MaxX, MinY, MaxY: Integer;
   ScanY, SpanStart, SpanEnd, PX: Integer;
   MaxCrossings: Integer;
@@ -2666,7 +2676,7 @@ var
   Tx, Ty, Tw: Double;
   Segments: array of TOFDPoint;
   P: PByte;
-  A: Byte;
+  A: Integer;
   InvSrcA: Integer;
   Ytest: Double;
   Y1, Y2, X1, X2v, DY, IX: Double;
@@ -2733,6 +2743,8 @@ begin
   if not Assigned(Dst) or not Assigned(Dst.Pixels) then Exit;
   if Length(Commands) = 0 then Exit;
   A := Trunc(Alpha * 255);
+  if A > 255 then A := 255
+  else if A < 0 then A := 0;
   if A = 0 then Exit;
   if Length(ColorMap) = 0 then Exit;
 
@@ -2750,7 +2762,6 @@ begin
   OuterR := OuterR * GR;
 
   { Parse path commands into contours (same as above) }
-  NumContours := 0;
   CurrX := 0; CurrY := 0;
   PrevX := 0; PrevY := 0;
   SetLength(AllContours, 0);

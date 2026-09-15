@@ -12,7 +12,7 @@ unit ofd_display_list;
 interface
 
 uses
-  Classes, SysUtils, Contnrs, Math, ofd_types, ofd_canvas_intf, ofd_glyphrun,
+  Classes, SysUtils, Contnrs, ofd_types, ofd_canvas_intf, ofd_glyphrun,
   ofd_ttf_glyf, ofd_render_outcome;
 
 type
@@ -506,7 +506,6 @@ begin
   inherited Create(ctAxialShadingFill);
   Alpha := 1.0;
   FillRule := frNonZero;
-  FillChar(ColorMap, SizeOf(ColorMap), 0);
   SetLength(ColorMap, 0);
 end;
 
@@ -524,7 +523,6 @@ begin
   inherited Create(ctRadialShadingFill);
   Alpha := 1.0;
   FillRule := frNonZero;
-  FillChar(ColorMap, SizeOf(ColorMap), 0);
   SetLength(ColorMap, 0);
 end;
 

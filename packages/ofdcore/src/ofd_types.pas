@@ -28,6 +28,24 @@ function OFDShouldCompactQueue(const ATombstones, ATotalEntries: Integer): Boole
   the cache a no-op (nothing stays cached) instead of an eviction loop
   against an empty list. }
 function OFDParsedPageShouldEvict(const ACount, ACapacity: Integer): Boolean;
+{ Eviction predicate for the document view's display-bitmap LRU cache (the
+  final, already-rotated page bitmaps Paint blits). The cache is bounded by
+  BOTH an entry count and a byte budget, because a single page rendered at
+  high zoom can itself be tens of megabytes. Callers run it as
+
+      while OFDDisplayCacheShouldEvict(Count, TotalBytes, NewBytes,
+                                       MaxBytes, MaxEntries) do
+        DeleteOldest;
+
+  so it must be False for an empty cache (loop termination) and stay True
+  while the cache is over either cap. A single entry larger than the whole
+  byte budget ends up cached alone: the caller hands out references to the
+  bitmap it cannot free itself, so it must be able to store it.
+  AMaxBytes <= 0 disables the byte budget; AMaxEntries <= 0 keeps at most one
+  entry. Negative byte values are treated as 0. }
+function OFDDisplayCacheShouldEvict(ACount: Integer;
+  ACurrentBytes, AAddBytes, AMaxBytes: Int64;
+  AMaxEntries: Integer): Boolean;
 
 type
 
@@ -350,6 +368,28 @@ begin
   if ACapacity <= 0 then
     Exit(ACount > 0);
   Result := ACount >= ACapacity;
+end;
+
+function OFDDisplayCacheShouldEvict(ACount: Integer;
+  ACurrentBytes, AAddBytes, AMaxBytes: Int64;
+  AMaxEntries: Integer): Boolean;
+begin
+  { Empty cache: never evict (this is also what terminates the caller's
+    eviction loop, so an oversized entry is cached alone instead of spinning). }
+  if ACount <= 0 then
+    Exit(False);
+  if ACurrentBytes < 0 then
+    ACurrentBytes := 0;
+  if AAddBytes < 0 then
+    AAddBytes := 0;
+  { Cache disabled (count cap <= 0): keep only the entry being inserted. }
+  if AMaxEntries <= 0 then
+    Exit(True);
+  if ACount >= AMaxEntries then
+    Exit(True);
+  if (AMaxBytes > 0) and (ACurrentBytes + AAddBytes > AMaxBytes) then
+    Exit(True);
+  Result := False;
 end;
 
 

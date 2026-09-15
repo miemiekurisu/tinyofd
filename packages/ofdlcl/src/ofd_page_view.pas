@@ -133,7 +133,6 @@ type
     procedure SBHorzChange(Sender: TObject);
     procedure LoadEmbeddedFonts;
     procedure UnloadFonts;
-    function ResolveFontName(const AFontID: String): String;
     procedure LogRenderError(const AMsg: String);
     procedure PutCacheBitmap(APageIndex: Integer; AZoom: Double; ABitmap: TBitmap);
     function GetPageCount: Integer;
@@ -142,8 +141,13 @@ type
     function GetZoomedWidth: Integer;
     function GetZoomedHeight: Integer;
     function GetCurrentZoom: Double;
-    function ContentWidth: Integer;
-    function ContentHeight: Integer;
+    { Cache key for a fixed-DPI render (RenderPageToBitmapAtWidth /
+      GetCachedBitmap). DoPaint keys entries by ZOOM (always > 0) and these two
+      by RENDER DPI, which shares the numeric space: a 135px thumbnail of a
+      228.6mm-wide page has DPI 15.0 and would be served to a 1500% zoom
+      repaint (and vice versa). Fixed-DPI keys are therefore stored negated,
+      so the two key spaces can never collide. }
+    function DPIKey(const ADPI: Double): Double;
   protected
     procedure Paint; override;
     procedure Resize; override;
@@ -196,7 +200,7 @@ procedure Register;
 implementation
 
 uses
-  Contnrs, ofd_render_worker;
+  ofd_render_worker;
 
 function OFDGetWheelScrollLines: Integer;
 var
@@ -390,20 +394,9 @@ begin
   Result := FZoom;
 end;
 
-function TOFDPageView.ContentWidth: Integer;
+function TOFDPageView.DPIKey(const ADPI: Double): Double;
 begin
-  if FScrollBarsVisible then
-    Result := GetZoomedWidth + ScrollBarWidth
-  else
-    Result := GetZoomedWidth;
-end;
-
-function TOFDPageView.ContentHeight: Integer;
-begin
-  if FScrollBarsVisible then
-    Result := GetZoomedHeight + ScrollBarWidth
-  else
-    Result := GetZoomedHeight;
+  Result := -Abs(ADPI);
 end;
 
 procedure TOFDPageView.InvalidateCache;
@@ -457,7 +450,9 @@ function TOFDPageView.GetCachedBitmap(APageIndex: Integer; AZoom: Double): TBitm
 var
   CacheEntry: TOFDPageCacheEntry;
 begin
-  CacheEntry := TOFDPageCacheEntry(GetCachedPageEntry(APageIndex, AZoom));
+  { AZoom is the fixed RENDER DPI used by RenderPageToBitmapAtWidth, not the
+    view zoom: use the negated key space so it cannot alias a DoPaint entry. }
+  CacheEntry := TOFDPageCacheEntry(GetCachedPageEntry(APageIndex, DPIKey(AZoom)));
   if Assigned(CacheEntry) then
     Result := CacheEntry.Bitmap
   else
@@ -1110,8 +1105,6 @@ end;
 function InternalAddFontMemResourceEx(pFile: Pointer; cbFile: Longint;
   Reserved: Pointer; var NumFonts: Cardinal): Pointer; stdcall; external 'gdi32' name 'AddFontMemResourceEx';
 function InternalRemoveFontMemResourceEx(Handle: Pointer): LongBool; stdcall; external 'gdi32' name 'RemoveFontMemResourceEx';
-function InternalSendMessage(hWnd: Cardinal; Msg: Cardinal; wParam: Integer;
-  lParam: Integer): Integer; stdcall; external 'user32' name 'SendMessageW';
 function InternalPostMessage(hWnd: Cardinal; Msg: Cardinal; wParam: Integer;
   lParam: Integer): Integer; stdcall; external 'user32' name 'PostMessageW';
 const
@@ -1173,22 +1166,6 @@ begin
     Dispose(Entry);
   end;
   FLoadedFonts.Clear;
-end;
-
-function TOFDPageView.ResolveFontName(const AFontID: String): String;
-var
-  FontRes: TOFDFontResource;
-begin
-  if Assigned(FDocument) and Assigned(FDocument.ResourceManager) then
-  begin
-    FontRes := FDocument.ResourceManager.FindFontByID(AFontID);
-    if Assigned(FontRes) and (FontRes.FontName <> '') then
-    begin
-      Result := FontRes.FontName;
-      Exit;
-    end;
-  end;
-  Result := 'SimSun';
 end;
 
 procedure TOFDPageView.LoadDocument(const ADoc: TOFDDocument);
@@ -1359,6 +1336,22 @@ begin
   inherited Resize;
   if Assigned(FPage) then
   begin
+    { Coalesce the expensive re-render across a resize gesture, exactly like a
+      Ctrl+wheel zoom gesture: while FZoomPending the paint path stretches the
+      previous render and ZoomDebounceTimer commits ONE re-render
+      cZoomDebounceMs after the last resize event. Without this, dragging the
+      window in a fit mode re-computed the fit zoom on every resize event and
+      each following Paint re-rasterized the whole page (~1-2s per event on
+      complex documents). Only engaged when the offscreen bitmap already holds a
+      render, so the first layout after opening a document still renders
+      immediately. Enabled is cycled False/True to restart the interval. }
+    if Assigned(FOffscreenBitmap) and (FOffscreenBitmap.Width > 0) and
+       (FOffscreenBitmap.Height > 0) then
+    begin
+      FZoomPending := True;
+      FZoomDebounce.Enabled := False;
+      FZoomDebounce.Enabled := True;
+    end;
     ApplyZoomMode;
     UpdateScrollBarRanges;
   end;
@@ -1407,6 +1400,7 @@ begin
     A copy is returned so the caller can free it without corrupting the cache. }
   if Assigned(FPageCache) then
   begin
+    { Negated (fixed-DPI) key space, see DPIKey. }
     CachedBmp := GetCachedBitmap(FPageIndex, RenderDPI);
     if Assigned(CachedBmp) then
     begin
@@ -1471,9 +1465,10 @@ begin
   end;
 
   { Cache only successful full-page renders so a page that partially rasterized
-    (rsDegraded/rsFailed) is not frozen as a stale bitmap. }
+    (rsDegraded/rsFailed) is not frozen as a stale bitmap. Stored under the
+    negated fixed-DPI key (DPIKey) so it can never alias a DoPaint zoom entry. }
   if RenderedOK and Assigned(FPageCache) then
-    PutCacheBitmap(FPageIndex, RenderDPI, Result);
+    PutCacheBitmap(FPageIndex, DPIKey(RenderDPI), Result);
 end;
 
 procedure TOFDPageView.LogRenderError(const AMsg: String);

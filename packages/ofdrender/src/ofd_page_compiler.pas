@@ -73,6 +73,22 @@ type
 
 implementation
 
+{ Typed UnicodeString command tokens for ParsePathData. Untyped literals are
+  AnsiString in delphiunicode mode, and each per-token comparison would carry
+  an implicit AnsiString->UnicodeString conversion (warning 4104). }
+const
+  cTokSpace: UnicodeString = ' ';
+  cTokDoubleSpace: UnicodeString = '  ';
+  cTokSemicolon: UnicodeString = ';';
+  cTokM: UnicodeString = 'M';
+  cTokL: UnicodeString = 'L';
+  cTokB: UnicodeString = 'B';
+  cTokQ: UnicodeString = 'Q';
+  cTokS: UnicodeString = 'S';
+  cTokC: UnicodeString = 'C';
+  cTokZ: UnicodeString = 'Z';
+  cTokClosePath: UnicodeString = 'CLOSEPATH';
+
 { TOFDPageCompiler }
 
 constructor TOFDPageCompiler.Create(ADocument: TOFDDocument; APageIndex: Integer;
@@ -320,7 +336,6 @@ var
   HasActiveClip: Boolean;
 begin
   if not Assigned(APathObj) then Exit;
-  FillChar(Path, SizeOf(Path), 0);
   SetLength(Path, 0);
   HasActiveClip := False;
 
@@ -914,7 +929,7 @@ procedure TOFDPageCompiler.ParsePathData(const AData: String;
 var
   Parts: TStringList;
   I, CmdIdx: Integer;
-  Cmd, PathData: String;
+  Cmd, NextCmd, PathData: String;
   Values: array of Double;
 begin
   SetLength(ACommands, 0);
@@ -923,10 +938,10 @@ begin
   if AData = '' then Exit;
 
   PathData := AData;
-  while Pos('  ', PathData) > 0 do
-    PathData := StringReplace(PathData, '  ', ' ', [rfReplaceAll]);
-  PathData := StringReplace(PathData, #9, ' ', [rfReplaceAll]);
-  PathData := StringReplace(PathData, ';', ' ', [rfReplaceAll]);
+  while Pos(cTokDoubleSpace, PathData) > 0 do
+    PathData := StringReplace(PathData, cTokDoubleSpace, cTokSpace, [rfReplaceAll]);
+  PathData := StringReplace(PathData, #9, cTokSpace, [rfReplaceAll]);
+  PathData := StringReplace(PathData, cTokSemicolon, cTokSpace, [rfReplaceAll]);
 
   Parts := TStringList.Create;
   try
@@ -959,13 +974,13 @@ begin
       Cmd := UpCase(Parts[I]);
       Inc(I);
 
-      if (Cmd = 'M') or (Cmd = 'L') then
+      if (Cmd = cTokM) or (Cmd = cTokL) then
       begin
         if (I + 1 < Parts.Count) and TryStrToFloat(Parts[I], Values[0]) and
            TryStrToFloat(Parts[I + 1], Values[1]) then
         begin
           SetLength(ACommands, CmdIdx + 1);
-          if Cmd = 'M' then
+          if Cmd = cTokM then
             ACommands[CmdIdx].Cmd := pcMoveTo
           else
             ACommands[CmdIdx].Cmd := pcLineTo;
@@ -979,7 +994,7 @@ begin
           Inc(I, 2);
         end;
       end
-      else if Cmd = 'B' then
+      else if Cmd = cTokB then
       begin
         { Cubic Bezier: 6 params = control1(x,y) + control2(x,y) + endpoint(x,y) }
         if (I + 5 < Parts.Count) then
@@ -1004,7 +1019,7 @@ begin
           end;
         end;
       end
-      else if Cmd = 'Q' then
+      else if Cmd = cTokQ then
       begin
         { Quadratic Bezier: 4 params = control(x,y) + endpoint(x,y) }
         if (I + 3 < Parts.Count) then
@@ -1027,34 +1042,38 @@ begin
           end;
         end;
       end
-      else if Cmd = 'S' then
+      else if Cmd = cTokS then
       begin
         { Start subpath: optionally followed by M-like coordinates }
-        if (I + 1 < Parts.Count) and (UpCase(Parts[I]) <> 'M') and
-           (UpCase(Parts[I]) <> 'L') and (UpCase(Parts[I]) <> 'B') and
-           (UpCase(Parts[I]) <> 'C') and (UpCase(Parts[I]) <> 'S') and
-           (UpCase(Parts[I]) <> 'Z') and (UpCase(Parts[I]) <> 'Q') and
-           (UpCase(Parts[I]) <> 'CLOSEPATH') and
-           TryStrToFloat(Parts[I], Values[0]) and
-           TryStrToFloat(Parts[I + 1], Values[1]) then
+        if (I + 1 < Parts.Count) then
         begin
-          SetLength(ACommands, CmdIdx + 1);
-          ACommands[CmdIdx].Cmd := pcMoveTo;
-          ACommands[CmdIdx].X := Values[0];
-          ACommands[CmdIdx].Y := Values[1];
-          ACommands[CmdIdx].CX := 0;
-          ACommands[CmdIdx].CY := 0;
-          ACommands[CmdIdx].X2 := 0;
-          ACommands[CmdIdx].Y2 := 0;
-          Inc(CmdIdx);
-          Inc(I, 2);
-        end
-        else
-        begin
-          { S with no params = just start a new subpath, no-op for path data }
+          NextCmd := UpCase(Parts[I]);
+          if (NextCmd <> cTokM) and
+             (NextCmd <> cTokL) and (NextCmd <> cTokB) and
+             (NextCmd <> cTokC) and (NextCmd <> cTokS) and
+             (NextCmd <> cTokZ) and (NextCmd <> cTokQ) and
+             (NextCmd <> cTokClosePath) and
+             TryStrToFloat(Parts[I], Values[0]) and
+             TryStrToFloat(Parts[I + 1], Values[1]) then
+          begin
+            SetLength(ACommands, CmdIdx + 1);
+            ACommands[CmdIdx].Cmd := pcMoveTo;
+            ACommands[CmdIdx].X := Values[0];
+            ACommands[CmdIdx].Y := Values[1];
+            ACommands[CmdIdx].CX := 0;
+            ACommands[CmdIdx].CY := 0;
+            ACommands[CmdIdx].X2 := 0;
+            ACommands[CmdIdx].Y2 := 0;
+            Inc(CmdIdx);
+            Inc(I, 2);
+          end
+          else
+          begin
+            { S with no params = just start a new subpath, no-op for path data }
+          end;
         end;
       end
-      else if (Cmd = 'C') or (Cmd = 'Z') or (Cmd = 'CLOSEPATH') then
+      else if (Cmd = cTokC) or (Cmd = cTokZ) or (Cmd = cTokClosePath) then
       begin
         { Close path - no parameters }
         SetLength(ACommands, CmdIdx + 1);

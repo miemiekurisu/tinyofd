@@ -30,22 +30,15 @@ type
     FThumbnailScale: Double;
     FRenderService: TOFDRenderService;
     FScrollPosition: Integer;
-    FNeedRedraw: Boolean;
-    FInitialized: Boolean;
     procedure SetCurrentPageIndex(const AValue: Integer);
+    { Paint override body (kept as a separate method so the drawing code has the
+      Sender-shaped signature used by the old event wiring). }
     procedure DoPaint(Sender: TObject);
-    procedure DoResize(Sender: TObject);
-    procedure DoMouseWheel(Sender: TObject; Shift: TShiftState; WheelDelta: Integer;
-      MousePos: TPoint; var Handled: Boolean);
-    procedure DoMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState;
-      X, Y: Integer);
-    procedure EnsureInitialized;
     procedure LoadThumbnail(APageIndex: Integer);
     procedure ClearThumbnails;
     function GetThumbnailCount: Integer;
   protected
     procedure Paint; override;
-    procedure Loaded; override;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -58,6 +51,9 @@ type
 procedure Register;
 
 implementation
+
+uses
+  ofd_render_worker;
 
 procedure Register;
 begin
@@ -75,27 +71,17 @@ begin
   FThumbnailScale := 0.3;
   FRenderService := nil;
   FScrollPosition := 0;
-  FNeedRedraw := True;
-  FInitialized := False;
   Color := clWindow;
   DoubleBuffered := True;
   TabStop := True;
 end;
 
 destructor TOFDThumbnailView.Destroy;
-var
-  I: Integer;
 begin
   ClearThumbnails;
   if Assigned(FRenderService) then
     FreeAndNil(FRenderService);
   inherited Destroy;
-end;
-
-procedure TOFDThumbnailView.EnsureInitialized;
-begin
-  // 确保已初始化
-  if FDocument = nil then Exit;
 end;
 
 function TOFDThumbnailView.GetThumbnailCount: Integer;
@@ -115,7 +101,7 @@ var
   DisplayList: TOFDDisplayList;
   Surface: TOFDSurface;
   RenderedBmp: TBitmap;
-  I, J: Integer;
+  J: Integer;
   OldLen: Integer;
 begin
   if not Assigned(FDocument) then Exit;
@@ -192,6 +178,9 @@ begin
             Compiler.Free;
           end;
         except
+          on E: Exception do
+            AppendRenderErrorLog('thumb', Format('page %d render failed: %s',
+              [APageIndex, E.Message]));
           { Leave the white placeholder on failure; page still shows its number. }
         end;
       end;
@@ -246,7 +235,7 @@ end;
 procedure TOFDThumbnailView.DoPaint(Sender: TObject);
 var
   C: TCanvas;
-  I: Integer;
+  I, Count, Step: Integer;
   X, Y: Integer;
   ThumbnailHeight: Integer;
   ThumbnailGap: Integer;
@@ -261,16 +250,26 @@ begin
   C := Canvas;
   C.Brush.Color := Color;
   C.FillRect(0, 0, ClientWidth, ClientHeight);
-  
+
   ThumbnailGap := 8;
   ThumbnailHeight := Round(FThumbnailHeight * FThumbnailScale);
-  
-  // 计算可见范围
-  StartIndex := 0;
-  EndIndex := Length(FThumbnailList) - 1;
-  
+
+  { Only the visible window (plus one item of margin) is drawn and lazily
+    loaded. This used to walk EVERY page on every repaint: with an unloaded
+    document it triggered a full-page render per page before the first frame
+    finished, no matter how small the panel or where it was scrolled. }
+  Count := Length(FThumbnailList);
+  if Count = 0 then Exit;
+  Step := ThumbnailHeight + ThumbnailGap;
+  if Step <= 0 then Step := 1;
+  StartIndex := (FScrollPosition - 8) div Step - 1;
+  if StartIndex < 0 then StartIndex := 0;
+  EndIndex := (FScrollPosition + ClientHeight - 8) div Step + 1;
+  if EndIndex > Count - 1 then EndIndex := Count - 1;
+  if EndIndex < StartIndex then Exit;
+
   // 绘制缩略图
-  Y := -FScrollPosition + 8;
+  Y := -FScrollPosition + 8 + StartIndex * Step;
   for I := StartIndex to EndIndex do
   begin
     if not FThumbnailList[I].IsLoaded then
@@ -314,82 +313,6 @@ begin
     Y := Y + ThumbnailHeight + ThumbnailGap;
   end;
   
-  FNeedRedraw := False;
-end;
-
-procedure TOFDThumbnailView.DoResize(Sender: TObject);
-begin
-  Invalidate;
-end;
-
-procedure TOFDThumbnailView.DoMouseWheel(Sender: TObject; Shift: TShiftState;
-  WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
-var
-  ScrollAmount: Integer;
-  MaxScroll: Int64;
-  TotalHeight: Int64;
-begin
-  ScrollAmount := WheelDelta div 8;
-  FScrollPosition := FScrollPosition + ScrollAmount;
-  
-  // 限制滚动范围，防止整数溢出
-  if Length(FThumbnailList) > 0 then
-  begin
-    TotalHeight := Int64(Length(FThumbnailList)) * (Round(FThumbnailHeight * FThumbnailScale) + 8);
-    MaxScroll := Max(0, TotalHeight - ClientHeight);
-  end
-  else
-    MaxScroll := 0;
-    
-  if FScrollPosition < 0 then FScrollPosition := 0;
-  if FScrollPosition > MaxScroll then FScrollPosition := MaxScroll;
-  
-  Invalidate;
-  Handled := True;
-end;
-
-procedure TOFDThumbnailView.DoMouseDown(Sender: TObject; Button: TMouseButton;
-  Shift: TShiftState; X, Y: Integer);
-var
-  ThumbnailHeight: Integer;
-  ThumbnailGap: Integer;
-  I: Integer;
-  ClickY: Integer;
-  ListLen: Integer;
-begin
-  if Button = mbLeft then
-  begin
-    if not Assigned(FDocument) then Exit;
-    
-    ThumbnailGap := 8;
-    ThumbnailHeight := Round(FThumbnailHeight * FThumbnailScale);
-    ClickY := Y + FScrollPosition;
-    ListLen := Length(FThumbnailList);
-    
-    // 检测点击了哪个缩略图
-    if ListLen > 0 then
-    begin
-      Y := ThumbnailGap;
-      for I := 0 to ListLen - 1 do
-      begin
-        if (ClickY >= Y) and (ClickY < Y + ThumbnailHeight) then
-        begin
-          CurrentPageIndex := I;
-          // 触发 OnClick 事件
-          if Assigned(OnClick) then
-            OnClick(Self);
-          Break;
-        end;
-        Y := Y + ThumbnailHeight + ThumbnailGap;
-      end;
-    end;
-  end;
-end;
-
-procedure TOFDThumbnailView.Loaded;
-begin
-  inherited Loaded;
-  FNeedRedraw := True;
 end;
 
 procedure TOFDThumbnailView.LoadDocument(const ADoc: TOFDDocument);
@@ -404,7 +327,6 @@ begin
       FreeAndNil(FRenderService);
     FDocument := nil;
     FCurrentPageIndex := 0;
-    FNeedRedraw := True;
     Invalidate;
     Exit;
   end;
@@ -430,7 +352,6 @@ begin
     LoadThumbnail(I);
   end;
   
-  FNeedRedraw := True;
   Invalidate;
 end;
 
@@ -449,7 +370,6 @@ begin
   for I := 0 to MaxPreload - 1 do
     LoadThumbnail(I);
 
-  FNeedRedraw := True;
   Invalidate;
 end;
 
