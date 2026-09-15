@@ -3,6 +3,7 @@ program ofd_test_render_runner;
 uses
   Classes, SysUtils, consoletestrunner,
   test_compositor, test_display_list, test_ttf_glyf,
+  test_ttf_glyf_hardening,
   test_renderservice_group_alpha, test_renderservice_image, test_page_compiler_transform,
   test_render_service_fixes;
 

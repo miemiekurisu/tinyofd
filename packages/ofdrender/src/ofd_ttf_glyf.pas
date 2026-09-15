@@ -103,26 +103,41 @@ end;
 function GetTTCFaceBase(const AFontData: TBytes): Integer;
 begin
   Result := 0;
-  if Length(AFontData) < 12 then Exit;
+  if Length(AFontData) < 16 then Exit;
   if ReadBE32(AFontData, 0) = $74746366 then { 'ttcf' }
+  begin
     Result := Integer(ReadBE32(AFontData, 12));
+    if (Result < 0) or (Result + 12 > Length(AFontData)) then
+      Result := 0;
+  end;
 end;
 
 function FindTableOffset(const AFontData: TBytes; const ATag: String): Integer;
 var
-  I, NumTables, Base: Integer;
+  I, NumTables, Base, Ofs, Len: Integer;
   Tag: array[0..3] of AnsiChar;
 begin
   Result := -1;
   if Length(AFontData) < 12 then Exit;
   Base := GetTTCFaceBase(AFontData);
+  if (Base < 0) or (Base + 12 > Length(AFontData)) then Exit;
   NumTables := ReadBE16(AFontData, Base + 4);
+  { The directory itself must fit in the file: NumTables is attacker-controlled
+    (up to 65535) and the loop below would read past a short buffer. }
+  if Int64(Base) + 12 + Int64(NumTables) * 16 > Length(AFontData) then Exit;
   for I := 0 to NumTables - 1 do
   begin
     Move(AFontData[Base + 12 + I * 16], Tag, 4);
     if String(Tag) = ATag then
     begin
-      Result := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 8));
+      Ofs := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 8));
+      Len := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 12));
+      { Reject directories whose declared range leaves the file: every later
+        `Offset + k <= Length` guard would otherwise be the only barrier and
+        huge offsets can overflow the Integer arithmetic around it. }
+      if (Ofs < 0) or (Len < 0) or (Int64(Ofs) + Int64(Len) > Length(AFontData)) then
+        Exit;
+      Result := Ofs;
       Exit;
     end;
   end;
@@ -130,19 +145,25 @@ end;
 
 function GetTableLength(const AFontData: TBytes; const ATag: String): Integer;
 var
-  I, NumTables, Base: Integer;
+  I, NumTables, Base, Ofs, Len: Integer;
   Tag: array[0..3] of AnsiChar;
 begin
   Result := 0;
   if Length(AFontData) < 12 then Exit;
   Base := GetTTCFaceBase(AFontData);
+  if (Base < 0) or (Base + 12 > Length(AFontData)) then Exit;
   NumTables := ReadBE16(AFontData, Base + 4);
+  if Int64(Base) + 12 + Int64(NumTables) * 16 > Length(AFontData) then Exit;
   for I := 0 to NumTables - 1 do
   begin
     Move(AFontData[Base + 12 + I * 16], Tag, 4);
     if String(Tag) = ATag then
     begin
-      Result := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 12));
+      Ofs := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 8));
+      Len := Integer(ReadBE32(AFontData, Base + 12 + I * 16 + 12));
+      if (Ofs < 0) or (Len < 0) or (Int64(Ofs) + Int64(Len) > Length(AFontData)) then
+        Exit;
+      Result := Len;
       Exit;
     end;
   end;
@@ -150,10 +171,21 @@ end;
 
 function ReadLocusOffset(const AFontData: TBytes; ALocaOffset, AIndex, AIndexFormat: Integer): Integer;
 begin
+  { -1 signals a corrupt/garbage glyph index or loca entry: callers must treat
+    it as "no glyph" instead of indexing the loca array blindly. }
+  Result := -1;
+  if (AIndex < 0) or (ALocaOffset < 0) then Exit;
   if AIndexFormat = 0 then
-    Result := ReadBE16(AFontData, ALocaOffset + AIndex * 2) * 2
+  begin
+    if Int64(ALocaOffset) + Int64(AIndex) * 2 + 2 > Length(AFontData) then Exit;
+    Result := ReadBE16(AFontData, ALocaOffset + AIndex * 2) * 2;
+  end
   else
+  begin
+    if Int64(ALocaOffset) + Int64(AIndex) * 4 + 4 > Length(AFontData) then Exit;
     Result := Integer(ReadBE32(AFontData, ALocaOffset + AIndex * 4));
+    if Result < 0 then Result := -1;
+  end;
 end;
 
 { Apply 2x2 transform and translation to all points in a glyph path.
@@ -199,7 +231,8 @@ begin
 end;
 
 function ParseTTFGlyphPathInternal(const AFontData: TBytes; AGlyphIndex: Integer;
-  AMaxDepth: Integer; out APath: TOFDGlyphPath; out AMetrics: TOFDGlyphMetrics): Boolean;
+  AMaxDepth: Integer; var APointBudget: Int64;
+  out APath: TOFDGlyphPath; out AMetrics: TOFDGlyphMetrics): Boolean;
 
 { Compound glyph component flags }
 const
@@ -291,6 +324,8 @@ begin
 
   GlyphStart := ReadLocusOffset(AFontData, LocaOffset, AGlyphIndex, IndexFormat);
   GlyphEnd := ReadLocusOffset(AFontData, LocaOffset, AGlyphIndex + 1, IndexFormat);
+  if (GlyphStart < 0) or (GlyphEnd < 0) or (GlyphEnd < GlyphStart) then
+    Exit;
 
   if (GlyphStart = 0) and (GlyphEnd = 0) then
   begin
@@ -309,6 +344,12 @@ begin
   end;
 
   GlyphOff := GlyfOffset + GlyphStart;
+  { The 10-byte simple/compound header must lie inside the file before it is
+    read; a loca entry pointing at the last few bytes used to read past it. }
+  if Int64(GlyphOff) + 10 > Length(AFontData) then
+  begin
+    Result := True; APath.NumContours := 0; APath.IsFilled := False; Exit;
+  end;
   NumContours := ReadBE16S(AFontData, GlyphOff);
   APath.IsCompound := NumContours < 0;
 
@@ -340,7 +381,7 @@ begin
     CompMore := True;
     CompHaveInstr := False;
 
-    while CompMore and (CompOff + 4 < CompDataEnd) do
+    while CompMore and (CompOff + 4 < CompDataEnd) and (APointBudget > 0) do
     begin
       CompFlags := ReadBE16(AFontData, CompOff);
       Inc(CompOff, 2);
@@ -394,14 +435,19 @@ begin
         CompMatrix[1, 1] := CompScale;
       end;
 
-      { Recursively resolve component }
+      { Recursively resolve component. APointBudget is shared across the whole
+        recursion: a compound-of-compounds font with k components per level is
+        exponential in point copies; the budget aborts the merge long before
+        the allocation explodes (DoS guard against untrusted fonts). }
       if ParseTTFGlyphPathInternal(AFontData, CompGlyphID, AMaxDepth - 1,
-        ComponentPath, ComponentMetrics) then
+        APointBudget, ComponentPath, ComponentMetrics) then
       begin
         if ComponentPath.NumContours > 0 then
         begin
           TransformGlyphPath(ComponentPath, CompMatrix, CompX, CompY);
           MergeGlyphPath(MergedPath, ComponentPath);
+          for J := 0 to ComponentPath.NumContours - 1 do
+            Dec(APointBudget, Length(ComponentPath.Contours[J].Points));
         end;
       end;
 
@@ -441,6 +487,14 @@ begin
     10: endPtsOfGlyph[0..NumContours-1] (2 bytes each)
     10+2*N: instructions (2 bytes length)
     12+2*N: flags[] then xCoordinates[] then yCoordinates[] }
+  { The endPtsOfGlyph array (2 * NumContours bytes) and the instruction length
+    field must fit inside BOTH the declared glyph and the file before they are
+    read: NumContours is attacker-controlled (up to 32767). }
+  if (Int64(NumContours) * 2 + 12 > DataLen) or
+     (Int64(GlyphOff) + 12 + Int64(NumContours) * 2 > Length(AFontData)) then
+  begin
+    APath.NumContours := 0; APath.IsFilled := False; Result := True; Exit;
+  end;
   InstrLen := ReadBE16(AFontData, GlyphOff + 10 + NumContours * 2);
   TotalPoints := ReadBE16(AFontData, GlyphOff + 10 + (NumContours - 1) * 2) + 1;
 
@@ -515,6 +569,8 @@ begin
     end
     else if (Flags[CurPt] and flagXsame) = 0 then
     begin
+      { two-byte read: the high byte must still be inside the glyph buffer }
+      if XBuf + 2 > EndBuf then Break;
       XData[XCount] := ReadBE16FromPtr(XBuf);
       Inc(XBuf, 2);
       Inc(XCount);
@@ -539,6 +595,7 @@ begin
     end
     else if (Flags[CurPt] and flagYsame) = 0 then
     begin
+      if YBuf + 2 > EndBuf then Break;
       YData[YCount] := ReadBE16FromPtr(YBuf);
       Inc(YBuf, 2);
       Inc(YCount);
@@ -638,8 +695,12 @@ end;
 
 function ParseTTFGlyphPath(const AFontData: TBytes; AGlyphIndex: Integer;
   out APath: TOFDGlyphPath; out AMetrics: TOFDGlyphMetrics): Boolean;
+var
+  Budget: Int64;
 begin
-  Result := ParseTTFGlyphPathInternal(AFontData, AGlyphIndex, 8, APath, AMetrics);
+  { Total point budget shared by the whole compound recursion. }
+  Budget := 200000;
+  Result := ParseTTFGlyphPathInternal(AFontData, AGlyphIndex, 8, Budget, APath, AMetrics);
 end;
 
 function GlyphPathToCommands(const APath: TOFDGlyphPath;
@@ -849,11 +910,16 @@ begin
   StartCodes := EndCodes + SegCountX2;
   IdDelta := StartCodes + SegCountX2;
   IdRangeOffset := IdDelta + SegCountX2;
+  { A corrupt SegCountX2 with a subtable near the end of the file can wrap the
+     Integer arithmetic negative; reject before any read uses these bases. }
+  if (EndCodes < 0) or (StartCodes < 0) or (IdDelta < 0) or (IdRangeOffset < 0) then
+    Exit;
 
   for I := 0 to SegCount - 1 do
   begin
     if EndCodes + I * 2 + 2 > Length(AFontData) then Break;
     if StartCodes + I * 2 + 2 > Length(AFontData) then Break;
+    if IdDelta + I * 2 + 2 > Length(AFontData) then Break;
 
     Code := ReadBE16(AFontData, StartCodes + I * 2);
     Delta := ReadBE16(AFontData, IdDelta + I * 2);
@@ -873,12 +939,17 @@ begin
     begin
       StartCode := Code;
       EndCode := ReadBE16(AFontData, EndCodes + I * 2);
-      GlyphOff := CmapSubTable + IdRangeOffset + SegCount * 2 + Offset - (SegCount - I) * 2;
+      { IdRangeOffset is already an absolute file position (see above), so the
+        glyph index array starts at &idRangeOffset[I] + idRangeOffset[I]. The
+        old formula added CmapSubTable a second time and looked up the wrong
+        position whenever Offset <> 0. }
+      GlyphOff := IdRangeOffset + I * 2 + Offset;
+      if GlyphOff < 0 then Continue;
 
       for J := StartCode to EndCode do
       begin
         LocalOff := GlyphOff + (J - StartCode) * 2;
-        if LocalOff + 2 > Length(AFontData) then Break;
+        if (LocalOff < 0) or (Int64(LocalOff) + 2 > Length(AFontData)) then Break;
         GlyphIdx := ReadBE16(AFontData, LocalOff);
         if GlyphIdx <> 0 then
           GlyphIdx := (GlyphIdx + Delta) mod 65536;
