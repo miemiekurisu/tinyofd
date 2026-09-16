@@ -11,7 +11,7 @@ uses
   fpimage, Printers, LazLogger,
   ofd_document, ofd_page_view,
   ofd_document_view, ofd_text_search, ofd_config,
-  ofd_goto_dialog, ofd_tab_strip
+  ofd_goto_dialog, ofd_tab_strip, ofd_version
 {$IFDEF DARWIN}
   , FPMagnifyBridge
 {$ENDIF}
@@ -3311,7 +3311,7 @@ procedure TViewerMainForm.MenuHelpAboutClick(Sender: TObject);
 var
   About: String;
 begin
-  About := 'OFD Viewer v1.0'#13#10#13#10;
+  About := 'TinyOFD Viewer v' + OFD_APP_VERSION + #13#10#13#10;
   About := About + '基于 OFDRW 架构思想实现'#13#10;
   About := About + '支持 OFD 格式文档查看'#13#10;
   About := About + '使用 Free Pascal / Lazarus / LCL 开发'#13#10;

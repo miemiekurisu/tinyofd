@@ -15,12 +15,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "TinyOFD"
       VALUE "FileDescription", "TinyOFD OFD Viewer"
-      VALUE "FileVersion", "0.0.2"
+      VALUE "FileVersion", "0.0.3"
       VALUE "InternalName", "ofdviewer"
       VALUE "LegalCopyright", "Copyright (c) TinyOFD"
       VALUE "OriginalFilename", "ofdviewer.exe"
       VALUE "ProductName", "TinyOFD OFD Viewer"
-      VALUE "ProductVersion", "0.0.2"
+      VALUE "ProductVersion", "0.0.3"
     END
   END
   BLOCK "VarFileInfo"

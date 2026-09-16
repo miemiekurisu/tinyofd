@@ -68,8 +68,9 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 #   $env:FPC_DIR      = <FPC 根目录 / root>
 #   $env:MINGW_DIR    = <MinGW-w64 根目录 / root>
 .\script\windows_release.ps1
-# 构建中间产物在 _tmp\release；发布 zip 复制到 release\
-# Intermediate output in _tmp\release; release zip copied to release\
+# 构建与发布 zip 均在 _tmp\release；版本号取自 apps/ofdviewer/ofd_version.pas（需与 ofdviewer.rc 同步）
+# Build output and the portable zip land in _tmp\release; the version comes from
+# apps/ofdviewer/ofd_version.pas (keep ofdviewer.rc in sync)
 ```
 
 ### macOS（⚠️ 未完成 / NOT release-ready）
@@ -91,10 +92,18 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 .\script\test.ps1       # Windows
 ```
 
+1000+ 自动化单元/回归测试（FPCUnit），覆盖解析、渲染命令、坐标变换、缓存、畸形输入 fuzz（固定 seed）与 heaptrc 泄漏检查。
+1000+ automated unit/regression tests (FPCUnit) covering parsing, render commands, transforms, caches, malformed-input fuzzing (fixed seeds) and heaptrc leak checks.
+
 ## 发布产物 / Releases
 
-> **当前仅发布 Windows (x64) 便携版 zip**（`release/tinyofd-win64-*.zip`，解压即用，无需安装）。
-> **Currently only the Windows (x64) portable zip is released** (`release/tinyofd-win64-*.zip`; extract and run, no install needed).
+> 正式安装包发布在 **GitHub Releases**：<https://github.com/miemiekurisu/tinyofd/releases>。
+> 当前版本 **v0.0.3**，提供 Windows (x64) 便携版 zip（`tinyofd-win64-<version>-<date>.zip`，解压即用，无需安装）。
+> Releases are published on **GitHub Releases**: <https://github.com/miemiekurisu/tinyofd/releases>.
+> Current version **v0.0.3**, Windows (x64) portable zip (`tinyofd-win64-<version>-<date>.zip`; extract and run, no install needed).
+>
+> 仓库内 `release/` 目录仅为早期版本存档，不再更新。
+> The in-repo `release/` folder is a legacy archive and no longer updated.
 
 ## 使用 / Usage
 

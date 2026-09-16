@@ -27,6 +27,15 @@ Write-Output "Release build complete:"
 Write-Output "  Executable: $($exe.FullName)"
 Write-Output "  Size: $([math]::Round($exe.Length / 1MB, 2)) MB"
 
+# Version comes from the single source of truth in apps/ofdviewer/ofd_version.pas.
+$version = $null
+$versionSrc = Join-Path $PROJECT_DIR "apps\ofdviewer\ofd_version.pas"
+if (Test-Path $versionSrc) {
+  $m = Select-String -Path $versionSrc -Pattern "OFD_APP_VERSION\s*=\s*'([^']+)'" | Select-Object -First 1
+  if ($m) { $version = $m.Matches[0].Groups[1].Value }
+}
+if (-not $version) { Write-Error "Cannot read OFD_APP_VERSION from $versionSrc"; exit 1 }
+
 # Build a portable zip (exe + README + LICENSE) for distribution.
 if (-not $SkipZip) {
   $zipDir = Join-Path $ReleaseDir "tinyofd"
@@ -36,7 +45,7 @@ if (-not $SkipZip) {
     $src = Join-Path $PROJECT_DIR $doc
     if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $zipDir $doc) -Force }
   }
-  $zipPath = Join-Path $ReleaseDir "tinyofd-win64-0.0.2-$(Get-Date -Format 'yyyyMMdd').zip"
+  $zipPath = Join-Path $ReleaseDir "tinyofd-win64-$version-$(Get-Date -Format 'yyyyMMdd').zip"
   if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
   Compress-Archive -Path (Join-Path $zipDir '*') -DestinationPath $zipPath -Force
   Write-Output "  Portable zip: $zipPath"
