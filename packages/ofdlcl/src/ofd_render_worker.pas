@@ -16,8 +16,8 @@ unit ofd_render_worker;
 interface
 
 uses
-  Classes, SysUtils, SyncObjs, Contnrs, Graphics, Forms,
-  ofd_types, ofd_document, ofd_page, ofd_resources, ofd_page_compiler,
+  Classes, SysUtils, SyncObjs, Contnrs, Graphics,
+  ofd_app_paths, ofd_types, ofd_document, ofd_page, ofd_resources, ofd_page_compiler,
   ofd_display_list, ofd_render_service, ofd_surface, ofd_surface_presenter,
   ofd_render_diagnostics, ofd_font_engine_intf;
 
@@ -36,8 +36,9 @@ const
   cMaxWorkerParsedPages = 8;
 
 { Shared, thread-safe render error log (all writers, worker + UI threads).
-  Writes "YYYY-MM-DD HH:NN:SS [tag] msg" to render_errors.log next to the exe
-  when not built with -dRELEASE. Silently ignores I/O failures. }
+  Writes "YYYY-MM-DD HH:NN:SS [tag] msg" to render_errors.log in the per-user
+  state directory (see ofd_app_paths; never inside a macOS .app bundle) when not
+  built with -dRELEASE. Silently ignores I/O failures. }
 procedure AppendRenderErrorLog(const ATag, AMsg: String);
 
 type
@@ -164,7 +165,7 @@ var
 begin
 {$ifndef RELEASE}
   try
-    LogPath := ExtractFilePath(Application.ExeName) + 'render_errors.log';
+    LogPath := OFDUserDataFilePath('render_errors.log');
     RenderLogLock.Enter;
     try
       { Size-bounded log: rotate current -> .old when too large (checked before

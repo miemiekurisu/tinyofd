@@ -44,8 +44,8 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 - 懒加载 + 缓存策略：按需解析页面、缓存渲染结果，保证打开与翻页流畅
   Lazy loading + caching: pages parsed on demand, render results cached, for smooth open and paging
 - 跨平台：Windows / macOS / Linux / Cross-platform: Windows / macOS / Linux
-  > **⚠️ 发布状态 / Release status**: **目前仅 Windows (x64) 为正式发布状态**。**macOS 版仍有已知问题、尚未解决，不视为 release**；Linux 未验证。请以 `release/` 目录中的 Windows 便携 zip 为准。
-  > **⚠️ Release status**: **Only Windows (x64) is a supported release today.** The **macOS build still has known, unresolved issues and is NOT release-ready**; Linux is unvalidated. Use the Windows portable zip in `release/`.
+  > **⚠️ 发布状态 / Release status**: **目前仅 Windows (x64) 为正式发布状态**。macOS 已可完整构建、签名并跑通单元/渲染测试，但**运行时验收尚未完成，不视为 release**；Linux 未验证。请以 `release/` 目录中的 Windows 便携 zip 为准。
+  > **⚠️ Release status**: **Only Windows (x64) is a supported release today.** macOS now builds, signs and passes its unit/render tests, but **runtime acceptance is not done, so it is NOT release-ready**; Linux is unvalidated. Use the Windows portable zip in `release/`.
 
 ## 截图 / Screenshot
 
@@ -75,15 +75,45 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 
 ### macOS（⚠️ 未完成 / NOT release-ready）
 
-> **⚠️ 重要 / IMPORTANT**：macOS 版**仍存在已知问题且尚未解决，当前不作为发布版本（not release-ready）**。请勿将 macOS 构建视为稳定产物。可能的问题包括：工具栏图标字体、字体渲染、窗口行为等。目前唯一受支持的发布平台是 **Windows (x64)**。
-> **⚠️ IMPORTANT**: The macOS build **still has known, unresolved issues and is NOT release-ready**. Do not treat it as a stable artifact. Likely issues: toolbar icon font, font rendering, window behavior. The only supported release platform is **Windows (x64)**.
+> **⚠️ 重要 / IMPORTANT**：macOS 版尚未做完整的运行时验收，仍**不作为发布版本**。目前唯一受支持的发布平台是 **Windows (x64)**。
+> **⚠️ IMPORTANT**: the macOS build is not yet fully verified at runtime and is **not a release artifact**. The only supported release platform remains **Windows (x64)**.
 
-如需实验性构建（仅供开发测试 / for development testing only）：
+构建脚本 / build scripts:
 
 ```bash
-./script/macos_release.sh
-# 产物 / Output: ofdviewer.app 与便携 zip / and portable zip
+export LAZARUS_DIR=<Lazarus 根目录 / root>   # 含 lazbuild；脚本也会自动探测常见位置
+./script/macos_build.sh                      # 调试构建（控制台 apptype，带调试信息）
+./script/macos_release.sh                    # 生产构建 .app（GUI apptype、-O2、strip、adhoc 签名）
+# 产物 / Output: _tmp/build/ofdviewer.app 与 _tmp/release/ofdviewer.app
 ```
+
+**构建期链接器要求 / linker requirement at build time**（macOS 未完成的主因 / the main macOS build blocker）：
+
+FPC 3.2.2 的 aarch64 Mach-O 生成器输出的 ObjC method list 会被新版 Apple 链接器
+（ld-prime：Xcode 16+/ld-1xxx、2026 版 Command Line Tools ld）判定为
+`malformed method list ... fixups found beyond the number of method entries`，
+而 Apple 已移除 `-ld_classic` 这条退路（新版只会提示 "no longer supported and will be ignored"）。
+因此链接 LCL Cocoa 目标文件需要一个 **pre-ld-prime 的 ld**（`PROGRAM:ld64-NNN`）。
+
+`script/macos_toolchain.sh` 会在构建时**自动探测 (linker, SDK) 组合**并把结果缓存到
+`_tmp/build/toolchain.env`；它按顺序尝试系统 ld、各 Xcode、各 Command Line Tools、
+conda 等目录下的 `ld`，并在遇到 SDK `.tbd` 解析失败时回退到更旧的 SDK。可用环境变量固定：
+
+```bash
+export OFD_LD=<path/to/ld>                 # 强制使用某个链接器 / force one linker
+export OFD_SDK=<path/to/MacOSX<old>.sdk>   # 强制使用某个 SDK / force one SDK
+export OFD_FORCE_TOOLCHAIN_PROBE=1         # 忽略缓存重新探测 / re-probe
+```
+
+FPC trunk（3.3.1+）修好这个问题后，探测会自动选中新版 ld，无需再改动脚本。
+
+其他 macOS 约定 / macOS conventions:
+
+- 配置与诊断日志写在用户目录，不写入 `.app` 内部（写进 bundle 会让 codesign 报
+  `detritus not allowed`）：`~/Library/Application Support/TinyOFD/`；Windows 仍沿用
+  exe 同目录的 `ofdviewer.ini`（便携版行为不变）。
+- Bundle 由 `script/macos_finalize_bundle.sh` 统一生成 `Info.plist`、图标、Material Icons
+  字体，并做 adhoc 签名（`org.tinyofd.ofdviewer`）。
 
 ### 测试 / Tests
 
@@ -94,6 +124,17 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 
 1000+ 自动化单元/回归测试（FPCUnit），覆盖解析、渲染命令、坐标变换、缓存、畸形输入 fuzz（固定 seed）与 heaptrc 泄漏检查。
 1000+ automated unit/regression tests (FPCUnit) covering parsing, render commands, transforms, caches, malformed-input fuzzing (fixed seeds) and heaptrc leak checks.
+
+`script/test.sh` 会先构建包再编译并运行 FPCUnit 测试；macOS 上需要 `LAZARUS_DIR`
+（渲染测试依赖 LazUtils 的 `FileUtil`）。解析样例文档的用例依赖 `testfile/`
+里的样例 OFD（**该目录不入库**）：缺失时这些用例会打印 `SKIP: ...` 并按通过处理，
+所以干净检出也能得到全绿的运行结果；样例放在别处时用 `OFD_TESTFILE_DIR` 指定目录。
+
+On macOS `script/test.sh` needs `LAZARUS_DIR` (the render tests use LazUtils'
+`FileUtil`). Tests that parse real samples depend on `testfile/`, which is **not
+versioned**: when a sample is missing they print `SKIP: ...` and count as passed,
+so a clean clone still runs green. Point `OFD_TESTFILE_DIR` elsewhere if the
+samples live outside the tree.
 
 ## 发布产物 / Releases
 

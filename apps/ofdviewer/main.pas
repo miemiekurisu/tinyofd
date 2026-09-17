@@ -13,7 +13,7 @@ uses
   ofd_document_view, ofd_text_search, ofd_config,
   ofd_goto_dialog, ofd_tab_strip, ofd_version
 {$IFDEF DARWIN}
-  , FPMagnifyBridge
+  , FPMagnifyBridge, FPOpenDocBridge
 {$ENDIF}
   ;
 
@@ -148,6 +148,7 @@ type
 {$IFDEF DARWIN}
     FLastMagnifyView: TObject;
     FMagnifyTimer: TTimer;
+    FOpenDocHooked: Boolean;   { native openFile:/openURLs: hook installed }
 {$ENDIF}
     FFolderFiles: TStringList;
     FFolderIndex: Integer;
@@ -225,6 +226,7 @@ type
     procedure DoExternalViewer;
 {$IFDEF DARWIN}
     procedure MagnifyTimerEvent(Sender: TObject);
+    procedure DrainOpenDocQueue;
 {$ENDIF}
     procedure DoFitPage;
     procedure DoFitWidth;
@@ -392,16 +394,42 @@ end;
 
 {$IFDEF DARWIN}
 { Register the bundled Material Icons font with CoreText so LCL can use it by
-  name ("Material Icons") for the toolbar glyphs. }
+  name ("Material Icons") for the toolbar glyphs.
+
+  The font ships inside the .app bundle (Contents/Resources, copied by
+  script/macos_finalize_bundle.sh); without this registration the five toolbar
+  glyphs fall back to a missing-glyph box. Registration is per-process, so it
+  must run before any control paints. Failures are logged rather than swallowed:
+  an unregistered font is invisible on screen but obvious in the log. }
 procedure RegisterBundledMaterialIcons;
+const
+  cFontName = 'MaterialIcons-Regular.ttf';
 var
   FontPath: String;
   PathStr: CFStringRef;
   Url: CFURLRef;
   Err: CFErrorRef;
+  Res: Integer;   { the binding returns an ordinal, not Boolean }
+
+  function Candidate(const ARelDir: String): String;
+  begin
+    Result := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0))) +
+      ARelDir + cFontName;
+  end;
+
 begin
-  FontPath := ExtractFilePath(ParamStr(0)) + '../Resources/MaterialIcons-Regular.ttf';
-  if not FileExists(FontPath) then Exit;
+  { Bundle layout first (Contents/MacOS -> ../Resources), then the source tree
+    for a binary started straight from _tmp/build without a bundle. }
+  FontPath := Candidate('..' + PathDelim + 'Resources' + PathDelim);
+  if not FileExists(FontPath) then
+    FontPath := Candidate('..' + PathDelim + '..' + PathDelim +
+      'apps' + PathDelim + 'ofdviewer' + PathDelim + 'src' + PathDelim +
+      'icons' + PathDelim);
+  if not FileExists(FontPath) then
+  begin
+    DebugLogger.DebugLn('MaterialIcons: font not found near ' + ParamStr(0));
+    Exit;
+  end;
   PathStr := CFStringCreateWithCString(kCFAllocatorDefault,
     PAnsiChar(UTF8String(FontPath)), kCFStringEncodingUTF8);
   if PathStr = nil then Exit;
@@ -410,9 +438,19 @@ begin
   CFRelease(PathStr);
   if Url = nil then Exit;
   Err := nil;
-  CTFontManagerRegisterFontsForURL(Url, kCTFontManagerScopeProcess, Err);
+  Res := CTFontManagerRegisterFontsForURL(Url, kCTFontManagerScopeProcess, Err);
   CFRelease(Url);
-  if Err <> nil then CFRelease(Err);
+  if Res <> 0 then
+    DebugLogger.DebugLn('MaterialIcons: registered ' + FontPath)
+  else
+  begin
+    { Re-registering in the same process (or an already-registered file) also
+      reports failure, so this is a diagnostic, not necessarily a defect. }
+    DebugLogger.DebugLn('MaterialIcons: registration failed for ' + FontPath +
+      ' (already registered, or CoreText rejected it; err=' +
+      IntToStr(PtrUInt(Err)) + ')');
+    if Err <> nil then CFRelease(Err);
+  end;
 end;
 {$ENDIF}
 
@@ -890,6 +928,50 @@ begin
   end;
 end;
 
+{ Finder / LaunchServices document opens.
+
+  LCL Cocoa never forwards application:openFile: / application:openURLs:, so
+  src/fp_opendoc.m hooks them on LCL's app delegate and queues the paths. The
+  queue is drained here: both sides run on the main thread, so OpenOFD always
+  executes in LCL's own call context instead of re-entrantly inside an AppKit
+  callback (which can happen during launch, before the form is ready).
+  Called from the pinch-zoom timer tick and once from FormShow. }
+procedure TViewerMainForm.DrainOpenDocQueue;
+var
+  PathBuf: array[0..4095] of AnsiChar;
+  DocPath: String;
+  Popped: Integer;
+begin
+  if not FOpenDocHooked then
+    FOpenDocHooked := FPInstallOpenDocHandler;
+  Popped := 0;
+  while FPPopOpenDocPath(@PathBuf[0], SizeOf(PathBuf)) do
+  begin
+    Inc(Popped);
+    DocPath := string(PAnsiChar(@PathBuf[0]));
+    if DocPath = '' then Continue;
+    if not FileExists(DocPath) then
+    begin
+      DebugLog('OpenDocQueue: not a readable file: ' + DocPath);
+      Continue;
+    end;
+    if SameFileName(ExpandFileName(DocPath), ExpandFileName(FFileName)) then
+      Continue;   { already the active document }
+    DebugLog('OpenDocQueue: opening ' + DocPath);
+    try
+      FStatusBar.SimpleText := Format('正在加载: %s...', [ExtractFileName(DocPath)]);
+      OpenOFD(DocPath);
+    except
+      on E: Exception do
+      begin
+        DebugLog('OpenDocQueue: OpenOFD FAILED: ' + E.ClassName + ' - ' + E.Message);
+        MessageDlg('打开文件失败: ' + E.Message, mtError, [mbOK], 0);
+      end;
+    end;
+    if Popped >= 8 then Break;   { never monopolise a timer tick }
+  end;
+end;
+
 { Self-healing pinch-zoom install. Runs on a timer: installs the native magnify
   handler on whichever view is currently active (single-page or continuous), and
   re-installs automatically whenever the active view changes (tab switch,
@@ -901,6 +983,9 @@ procedure TViewerMainForm.MagnifyTimerEvent(Sender: TObject);
 var
   ActiveView: TWinControl;
 begin
+  { Shared native-events tick: documents opened by Finder arrive here too, and
+    must be drained before the view-related early exits below. }
+  DrainOpenDocQueue;
   if FContinuous then ActiveView := FDocView else ActiveView := FPageView;
   if not Assigned(ActiveView) then Exit;
   if not ActiveView.HandleAllocated then Exit;
@@ -953,6 +1038,9 @@ begin
       FMagnifyTimer.OnTimer := @MagnifyTimerEvent;
     end;
     FMagnifyTimer.Enabled := True;
+    { Documents that LaunchServices handed over during launch are already in the
+      native queue; do not wait a tick to open them. }
+    DrainOpenDocQueue;
 {$ENDIF}
     DebugLog('FormShow OK');
   except
@@ -2066,10 +2154,16 @@ end;
 procedure TViewerMainForm.LoadSettings;
 var
   IIni: TIniFile;
+  IniPath: string;
   R: TRect;
   AreaW, AreaH: Integer;
 begin
-  IIni := TIniFile.Create(ChangeFileExt(Application.ExeName, '.ini'));
+  { Per-user location (see ViewerSettingsFileName); fall back to the file next
+    to the executable so an existing configuration is picked up once. }
+  IniPath := ViewerSettingsFileName;
+  if not FileExists(IniPath) then
+    IniPath := ViewerLegacySettingsFileName;
+  IIni := TIniFile.Create(IniPath);
   try
     if FileExists(IIni.FileName) then
     begin
@@ -2107,7 +2201,7 @@ procedure TViewerMainForm.SaveSettings;
 var
   IIni: TIniFile;
 begin
-  IIni := TIniFile.Create(ChangeFileExt(Application.ExeName, '.ini'));
+  IIni := TIniFile.Create(ViewerSettingsFileName);
   try
     IIni.WriteInteger('Window', 'Width', Width);
     IIni.WriteInteger('Window', 'Height', Height);

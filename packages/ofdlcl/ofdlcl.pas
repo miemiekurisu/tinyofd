@@ -9,7 +9,7 @@ interface
 
 uses
   ofd_page_view, ofd_find_bar, ofd_thumbnail_view, ofdlcl_register, 
-  ofd_document_view, ofd_render_worker, ofd_surface_presenter;
+  ofd_document_view, ofd_render_worker, ofd_surface_presenter, ofd_app_paths;
 
 implementation
 

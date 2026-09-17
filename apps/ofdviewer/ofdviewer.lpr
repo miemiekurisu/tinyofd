@@ -22,7 +22,29 @@ uses
   cthreads,
 {$ENDIF}
   Interfaces, Forms, SysUtils, Classes, Dialogs, LazLogger,
-  ofd_config, main;
+  ofd_app_paths, ofd_config, main;
+
+{ Where the debug log goes. Never next to the executable: on macOS that is
+  inside the .app bundle, which invalidates the code signature. }
+function ViewerLogDir: string;
+var
+  Dir: string;
+begin
+  Dir := OFDUserDataDir;
+  if Dir <> '' then
+    Dir := IncludeTrailingPathDelimiter(Dir) + 'logs'
+  else
+    Dir := IncludeTrailingPathDelimiter(GetCurrentDir) + '_tmp' + PathDelim + 'logs';
+  try
+    if not DirectoryExists(Dir) then
+      ForceDirectories(Dir);
+  except
+    { keep the path anyway; LazLogger degrades to stderr if it cannot write }
+  end;
+  if not DirectoryExists(Dir) then
+    Dir := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0))) + '_tmp' + PathDelim + 'logs';
+  Result := Dir;
+end;
 
 type
   TExceptionHandler = class
@@ -33,7 +55,6 @@ type
 var
   I: Integer;
   ExceptionHandler: TExceptionHandler;
-  LogDir: String;
 
 { TExceptionHandler }
 
@@ -45,20 +66,8 @@ end;
 
 begin
 {$ifndef RELEASE}
-  { Log to project _tmp/logs (working dir), fall back to exe dir. Only in
-    Debug builds - Release builds write no log files. }
-  LogDir := IncludeTrailingPathDelimiter(GetCurrentDir) + '_tmp' + PathDelim + 'logs';
-  try
-    if not DirectoryExists(LogDir) then
-      ForceDirectories(LogDir);
-  except
-    LogDir := '';
-  end;
-  if (LogDir = '') or not DirectoryExists(LogDir) then
-    LogDir := ExtractFilePath(ParamStr(0)) + '_tmp' + PathDelim + 'logs';
-  { IncludeTrailingPathDelimiter so the file lands in ...\logs\ofdviewer.log
-    instead of a misnamed ...\logsofdviewer.log. }
-  DebugLogger.LogName := IncludeTrailingPathDelimiter(LogDir) + 'ofdviewer.log';
+  { Debug-only diagnostics: Release builds write no log files. }
+  DebugLogger.LogName := IncludeTrailingPathDelimiter(ViewerLogDir) + 'ofdviewer.log';
 {$endif}
   DebugLogger.DebugLn('=== OFD Viewer Starting ===');
   DebugLogger.DebugLn('Params: ' + ParamStr(0));

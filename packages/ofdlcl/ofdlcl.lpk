@@ -42,6 +42,10 @@
       <Filename Value="src/ofd_surface_presenter.pas" />
       <UnitName Value="ofd_surface_presenter" />
     </Item>
+    <Item>
+      <Filename Value="src/ofd_app_paths.pas" />
+      <UnitName Value="ofd_app_paths" />
+    </Item>
   </Files>
     <RequiredPkgs>
       <Item>
