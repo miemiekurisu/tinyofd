@@ -84,6 +84,11 @@ type
 
 implementation
 
+{$IFDEF UNIX}
+uses
+  BaseUnix;
+{$ENDIF}
+
 { Process-wide sequence number making extract dir names unique even when two
   packages open within the same GetTickCount tick (GetTickCount resolution is
   ~1ms on some platforms, so PID+tick alone can collide). }
@@ -91,6 +96,63 @@ var
   ExtractDirSeq: Integer = 0;
 
 { TOFDPackage }
+
+{ paszlib's TUnZipper chmod()s every extracted file to the unix mode stored in
+  the archive's external attributes. Archives that carry no unix mode (our own
+  TZipper-authored fixtures, most Windows-made zips) store 0, so files land as
+  mode 000 and the follow-up read dies with EACCES "Permission denied". Restore
+  a usable mode on the extracted entry plus its parent directories instead of
+  trusting the stored mode. No-op on Windows, which has no such model.
+
+  Path-based on purpose, not a recursive walk: FPC's FindFirst/FindNext on
+  darwin share a single readdir buffer across handles, so a FindFirst nested
+  inside a suspended FindNext loop silently truncates the outer scan. }
+procedure ForceExtractedPathUsable(const ARoot, AInternalPath: String);
+{$IFDEF UNIX}
+  const
+    cDirMode  = LongWord($1C0);   { 0700 }
+    cFileMode = LongWord($180);   { 0600 }
+
+  procedure ChmodOne(const APath: String; AMode: LongWord);
+  var
+    U8: RawByteString;
+  begin
+    if APath = '' then Exit;
+    U8 := UTF8Encode(APath);
+    fpChmod(PAnsiChar(U8), AMode);
+  end;
+
+  var
+    Rel, Cur: String;
+    P, StartPos: Integer;
+  begin
+    ChmodOne(ARoot, cDirMode);
+    Rel := StringReplace(AInternalPath, '\', '/', [rfReplaceAll]);
+    while (Length(Rel) > 0) and ((Rel[1] = '/') or (Rel[1] = '\')) do
+      Delete(Rel, 1, 1);
+    if Rel = '' then Exit;
+
+    { walk down the directory components, then chmod the file itself }
+    Cur := ARoot;
+    StartPos := 1;
+    while StartPos <= Length(Rel) do
+    begin
+      P := StartPos;
+      while (P <= Length(Rel)) and (Rel[P] <> '/') do
+        Inc(P);
+      if P > Length(Rel) then Break;   { tail = file name }
+      Cur := IncludeTrailingPathDelimiter(Cur) + Copy(Rel, StartPos, P - StartPos);
+      ChmodOne(Cur, cDirMode);
+      StartPos := P + 1;
+    end;
+    ChmodOne(IncludeTrailingPathDelimiter(Cur) + Copy(Rel, StartPos, MaxInt),
+      cFileMode);
+  end;
+{$ELSE}
+begin
+  { Windows: no unix permission model, nothing to repair. }
+end;
+{$ENDIF}
 
 constructor TOFDPackage.Create;
 begin
@@ -349,6 +411,7 @@ procedure TOFDPackage.EnsureExtracted(const AInternalPath: String);
 var
   UnZipper: TUnZipper;
   FileList: TStringList;
+  Idx: Integer;
 begin
   if not IsOpen then Exit;
   if FileExists(StringReplace(
@@ -369,6 +432,13 @@ begin
         raise EOFDPackageError.CreateFmt(
           '解压条目失败: %s (文件: %s, 错误: %s)', [AInternalPath, FFileName, E.Message]);
     end;
+    { Both spellings: the name written on disk is the archive's own, which may
+      differ in case from the name the caller asked for. }
+    ForceExtractedPathUsable(FExtractDir, AInternalPath);
+    Idx := FindEntryIndex(AInternalPath);
+    if (Idx >= 0) and (Idx < FEntries.Count) and
+       (FEntries[Idx] <> AInternalPath) then
+      ForceExtractedPathUsable(FExtractDir, FEntries[Idx]);
   finally
     FileList.Free;
     UnZipper.Free;
