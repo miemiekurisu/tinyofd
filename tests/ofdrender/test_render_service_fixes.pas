@@ -892,7 +892,7 @@ begin
       BgPath[2].Cmd := pcLineTo; BgPath[2].X := 20; BgPath[2].Y := 20;
       BgPath[3].Cmd := pcLineTo; BgPath[3].X := 0; BgPath[3].Y := 20;
       BgPath[4].Cmd := pcClosePath;
-      DL.AddPath(BgPath, frNonZero, RGBColor(200, 0, 0), 1.0);
+      DL.AddPath(BgPath, frNonZero, RGBColor(200/255, 0, 0), 1.0);
 
       { Off-page clip (50,50)-(55,55)mm — outside the 20x20mm page, so the clip
         mask is (almost) all-zero. }
@@ -911,7 +911,7 @@ begin
       ObjPath[2].Cmd := pcLineTo; ObjPath[2].X := 4; ObjPath[2].Y := 4;
       ObjPath[3].Cmd := pcLineTo; ObjPath[3].X := 1; ObjPath[3].Y := 4;
       ObjPath[4].Cmd := pcClosePath;
-      DL.AddPath(ObjPath, frNonZero, RGBColor(0, 200, 0), 1.0);
+      DL.AddPath(ObjPath, frNonZero, RGBColor(0, 200/255, 0), 1.0);
 
       DL.AddPopClip;
     finally
@@ -1320,7 +1320,8 @@ begin
     CellPath[2].Cmd := pcLineTo; CellPath[2].X := 1; CellPath[2].Y := 1;
     CellPath[3].Cmd := pcLineTo; CellPath[3].X := 0; CellPath[3].Y := 1;
     CellPath[4].Cmd := pcClosePath;
-    CellContent.AddPath(CellPath, frNonZero, RGBColor(0, 150, 0), 1.0);
+    { RGBColor components are 0..1 doubles, not 0..255 bytes. }
+    CellContent.AddPath(CellPath, frNonZero, RGBColor(0, 150/255, 0), 1.0);
 
     DL := TOFDDisplayList.Create;
     try
@@ -1335,7 +1336,7 @@ begin
       BgPath[2].Cmd := pcLineTo; BgPath[2].X := 20; BgPath[2].Y := 20;
       BgPath[3].Cmd := pcLineTo; BgPath[3].X := 0; BgPath[3].Y := 20;
       BgPath[4].Cmd := pcClosePath;
-      DL.AddPath(BgPath, frNonZero, RGBColor(200, 0, 0), 1.0);
+      DL.AddPath(BgPath, frNonZero, RGBColor(200/255, 0, 0), 1.0);
 
       { Pattern fill limited to a sub-rect (5,5)-(10,10)mm. }
       SetLength(RegionPath, 5);

@@ -24,7 +24,16 @@ type
 implementation
 
 uses
-  SysUtils, Classes;
+  SysUtils, Classes, ofd_test_samples;
+
+const
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = '1.ofd';
+
+var
+  { Resolved in initialization; keeps Doc.Open(SampleDoc1) working anywhere. }
+  SampleDoc1: string;
 
 procedure TTestOFDTemplate.TestTemplateParsing;
 var
@@ -34,9 +43,11 @@ var
   I: Integer;
   HasTemplate, HasContent: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -71,9 +82,11 @@ var
   I: Integer;
   TemplateRef: TOFDTemplateRef;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -105,9 +118,11 @@ var
   TemplateRef: TOFDTemplateRef;
   LayerObj: TOFDLayerObject;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -150,9 +165,11 @@ var
   LayerObj: TOFDLayerObject;
   PathCount: Integer;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -198,9 +215,11 @@ var
   LayerObj: TOFDLayerObject;
   TextCount: Integer;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -259,9 +278,11 @@ var
   I: Integer;
   TemplateRef: TOFDTemplateRef;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -310,9 +331,11 @@ var
   TemplateRef: TOFDTemplateRef;
   HasBackground, HasBackgroundOnly: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -357,9 +380,11 @@ var
   I: Integer;
   TemplateRef: TOFDTemplateRef;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
-    Doc.Open('testfile/1.ofd');
+    Doc.Open(SampleDoc1);
     Entry := Doc.GetPageEntryByIndex(0);
     Page := TOFDPage.Create(Doc, Entry);
     try
@@ -383,5 +408,6 @@ begin
 end;
 
 initialization
+  SampleDoc1 := OFDSamplePath(cSampleName);
   RegisterTest(TTestOFDTemplate);
 end.

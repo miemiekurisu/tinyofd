@@ -5,7 +5,8 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testutils, testregistry,
-  ofd_document, ofd_page, ofd_errors;
+  ofd_document, ofd_page, ofd_errors,
+  ofd_test_samples;
 
 type
   TTestOFDDocumentExtended = class(TTestCase)
@@ -27,12 +28,20 @@ type
 implementation
 
 const
-  TestFile = 'testfile/atemp.ofd';
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = 'atemp.ofd';
+
+var
+  { Resolved in initialization; keeps the existing TestFile uses valid. }
+  TestFile: string;
 
 procedure TTestOFDDocumentExtended.TestOpenRealFile;
 var
   Doc: TOFDDocument;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -47,6 +56,8 @@ procedure TTestOFDDocumentExtended.TestPageCount_Positive;
 var
   Doc: TOFDDocument;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -61,6 +72,8 @@ procedure TTestOFDDocumentExtended.TestDocumentID_NotEmpty;
 var
   Doc: TOFDDocument;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -76,6 +89,8 @@ var
   Doc: TOFDDocument;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -94,6 +109,8 @@ var
   Doc: TOFDDocument;
   Entry1, Entry2: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -113,6 +130,8 @@ var
   I: Integer;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -131,6 +150,8 @@ procedure TTestOFDDocumentExtended.TestClose_ResetsState;
 var
   Doc: TOFDDocument;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -148,6 +169,8 @@ var
   Doc: TOFDDocument;
   PC1, PC2: Integer;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -166,6 +189,8 @@ procedure TTestOFDDocumentExtended.TestDiagnostics_NotNil;
 var
   Doc: TOFDDocument;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -182,6 +207,8 @@ var
   I: Integer;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -203,6 +230,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -229,6 +258,8 @@ var
   I: Integer;
   E1, E2: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -247,6 +278,7 @@ begin
 end;
 
 initialization
+  TestFile := OFDSamplePath(cSampleName);
   RegisterTest(TTestOFDDocumentExtended);
 
 end.

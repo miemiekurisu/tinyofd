@@ -5,7 +5,8 @@ interface
 
 uses
   Classes, SysUtils, Contnrs, fpcunit, testutils, testregistry,
-  ofd_document, ofd_page, ofd_errors;
+  ofd_document, ofd_page, ofd_errors,
+  ofd_test_samples;
 
 type
   TTestOFDPageParsing = class(TTestCase)
@@ -26,7 +27,13 @@ type
 implementation
 
 const
-  TestFile = 'testfile/atemp.ofd';
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = 'atemp.ofd';
+
+var
+  { Resolved in initialization; keeps the existing TestFile uses valid. }
+  TestFile: string;
 
 function CreateDocForTest: TOFDDocument;
 begin
@@ -70,6 +77,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -91,6 +100,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -115,6 +126,8 @@ var
   I: Integer;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -153,6 +166,8 @@ var
   I: Integer;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -191,6 +206,8 @@ var
   I: Integer;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -226,6 +243,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -249,6 +268,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -271,6 +292,8 @@ var
   Page: TOFDPage;
   Entry: TOFDPageEntry;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -295,6 +318,8 @@ var
   TxtObj: TOFDTextObject;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -338,6 +363,8 @@ var
   TxtObj: TOFDTextObject;
   TextCount: Integer;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -378,6 +405,8 @@ var
   TxtObj: TOFDTextObject;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := CreateDocForTest;
   try
     Entry := Doc.GetPageEntryByIndex(0);
@@ -412,6 +441,7 @@ begin
 end;
 
 initialization
+  TestFile := OFDSamplePath(cSampleName);
   RegisterTest(TTestOFDPageParsing);
 
 end.

@@ -5,7 +5,8 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testutils, testregistry,
-  ofd_document, ofd_resources, ofd_types, ofd_package;
+  ofd_document, ofd_resources, ofd_types, ofd_package,
+  ofd_test_samples;
 
 type
   TTestOFDResourcesExtended = class(TTestCase)
@@ -33,7 +34,13 @@ type
 implementation
 
 const
-  TestFile = 'testfile/atemp.ofd';
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = 'atemp.ofd';
+
+var
+  { Resolved in initialization; keeps the existing TestFile uses valid. }
+  TestFile: string;
 
 procedure TTestOFDResourcesExtended.TestFontResourceCreate;
 var
@@ -96,6 +103,8 @@ var
   Doc: TOFDDocument;
   FL: TOFDFontList;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -116,6 +125,8 @@ var
   Doc: TOFDDocument;
   FL: TOFDFontList;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -136,6 +147,8 @@ var
   Doc: TOFDDocument;
   FL: TOFDFontList;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -157,6 +170,8 @@ var
   Doc: TOFDDocument;
   Mgr: TOFDResourceManager;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -177,6 +192,8 @@ var
   Doc: TOFDDocument;
   Mgr: TOFDResourceManager;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -200,6 +217,8 @@ var
   Mgr: TOFDResourceManager;
   R: TOFDResource;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -222,6 +241,8 @@ var
   Doc: TOFDDocument;
   Mgr: TOFDResourceManager;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -247,6 +268,8 @@ var
   Doc: TOFDDocument;
   Mgr: TOFDResourceManager;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Doc := TOFDDocument.Create;
   try
     Doc.Open(TestFile);
@@ -308,6 +331,8 @@ var
   Mgr: TOFDResourceManager;
   GP, P1, DP: TOFDDrawParam;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { 祖先链上所有成员只设了一部分属性时，child 必须能继承到
     仅存在于祖辈的值 }
   Doc := TOFDDocument.Create;
@@ -352,6 +377,8 @@ var
   Mgr: TOFDResourceManager;
   GP, P1, DP: TOFDDrawParam;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { 顺序解析多个兄弟节点时，中间祖先的缓存对象不得被互相污染 }
   Doc := TOFDDocument.Create;
   try
@@ -391,6 +418,8 @@ var
   First, Second: TBytes;
   EntryName: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Real-entry load + memoized same-size re-read; entry names are case-matched
     against the package's central directory. }
   Doc := TOFDDocument.Create;
@@ -422,6 +451,8 @@ var
   Mgr: TOFDResourceManager;
   Data: TBytes;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Missing entries return an empty array (image renders empty), not an
     exception, matching the previous direct-stream read semantics. }
   Doc := TOFDDocument.Create;
@@ -446,6 +477,8 @@ var
   Mgr: TOFDResourceManager;
   Data: TBytes;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Path traversal must be neutralized like HasEntry does: caught by the
     method (empty result), never escaping to the caller. }
   Doc := TOFDDocument.Create;
@@ -465,6 +498,7 @@ begin
 end;
 
 initialization
+  TestFile := OFDSamplePath(cSampleName);
   RegisterTest(TTestOFDResourcesExtended);
 
 end.

@@ -5,7 +5,8 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testutils, testregistry,
-  ofd_package, ofd_errors;
+  ofd_package, ofd_errors,
+  ofd_test_samples;
 
 type
   TTestOFDPackageExtended = class(TTestCase)
@@ -42,13 +43,21 @@ type
 implementation
 
 const
-  TestFile = 'testfile/atemp.ofd';
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = 'atemp.ofd';
+
+var
+  { Resolved in initialization; keeps the existing TestFile uses valid. }
+  TestFile: string;
 
 procedure TTestOFDPackageExtended.TestReadAsBytes_ValidFile;
 var
   Pkg: TOFDPackage;
   B: TBytes;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -65,6 +74,8 @@ var
   Pkg: TOFDPackage;
   S: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -82,6 +93,8 @@ var
   Pkg: TOFDPackage;
   Strm: TStream;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -99,6 +112,8 @@ end;
 
 procedure TTestOFDPackageExtended.TestIsValidOFD_Valid;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   CheckTrue(TOFDPackage.IsValidOFD(TestFile), 'valid OFD returns True');
 end;
 
@@ -130,6 +145,8 @@ var
   Pkg: TOFDPackage;
   L: TStringList;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -148,6 +165,8 @@ var
   I: Integer;
   Found: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -173,6 +192,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -194,6 +215,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -215,6 +238,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -235,6 +260,8 @@ procedure TTestOFDPackageExtended.TestPathTraversal_AbsoluteSlash;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { OFD spec: leading slash is valid root path, e.g. /Document.xml }
   Pkg := TOFDPackage.Create;
   try
@@ -251,6 +278,8 @@ procedure TTestOFDPackageExtended.TestPathTraversal_AbsoluteBackslash;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Backslash also stripped to root path per OFD spec }
   Pkg := TOFDPackage.Create;
   try
@@ -267,6 +296,8 @@ procedure TTestOFDPackageExtended.TestReopenAfterClose;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -286,6 +317,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -307,6 +340,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -328,6 +363,8 @@ var
   Pkg: TOFDPackage;
   Raised: Boolean;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -380,6 +417,8 @@ var
   Pkg1, Pkg2: TOFDPackage;
   Dir1, Dir2: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Regression: two packages opened within the same GetTickCount tick must
     not collide on the extract dir name (process-wide seq suffix). }
   Pkg1 := TOFDPackage.Create;
@@ -409,6 +448,8 @@ var
   Pkg: TOFDPackage;
   Dir: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -426,6 +467,7 @@ procedure TTestOFDPackageExtended.TestHasEntry_CaseInsensitive;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
   { Regression for the lazy ASCII lookup index: case-insensitive matching
     must be preserved for ASCII names (the fast path). }
   Pkg := TOFDPackage.Create;
@@ -445,6 +487,7 @@ procedure TTestOFDPackageExtended.TestHasEntry_TrailingSlash;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -459,6 +502,7 @@ procedure TTestOFDPackageExtended.TestHasEntry_Missing;
 var
   Pkg: TOFDPackage;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -475,6 +519,7 @@ var
   Pkg: TOFDPackage;
   S: TStream;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
   Pkg := TOFDPackage.Create;
   try
     Pkg.Open(TestFile);
@@ -497,6 +542,7 @@ var
   I: Integer;
   E: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
   { Every real entry must resolve via HasEntry (ASCII fast path or fallback),
     and case-flipped names must resolve too, proving the lazy index reproduces
     the original linear scan for present entries. }
@@ -519,6 +565,7 @@ begin
 end;
 
 initialization
+  TestFile := OFDSamplePath(cSampleName);
   RegisterTest(TTestOFDPackageExtended);
 
 end.

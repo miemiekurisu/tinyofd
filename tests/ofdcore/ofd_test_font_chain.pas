@@ -7,7 +7,8 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testutils, testregistry,
-  ofd_document, ofd_page, ofd_resources;
+  ofd_document, ofd_page, ofd_resources,
+  ofd_test_samples;
 
 type
   TTestFontChain = class(TTestCase)
@@ -27,12 +28,22 @@ type
 implementation
 
 const
-  TestFile = 'testfile/atemp.ofd';
+  { Sample these tests parse. testfile/ is not versioned, so the
+    sample-dependent tests skip when it is absent (ofd_test_samples). }
+  cSampleName = 'atemp.ofd';
+
+var
+  { Resolved in initialization; keeps the existing TestFile uses valid. }
+  TestFile: string;
 
 procedure TTestFontChain.SetUp;
 begin
   FDoc := TOFDDocument.Create;
-  FDoc.Open(TestFile);
+  { SetUp runs BEFORE the per-test skip guard, so opening a missing sample here
+    would raise before any body can skip. Leave FDoc closed in that case; every
+    body returns at its OFDSkipMissingSample guard before touching FDoc. }
+  if not OFDSkipMissingSample(cSampleName) then
+    FDoc.Open(TestFile);
 end;
 
 procedure TTestFontChain.TearDown;
@@ -46,6 +57,8 @@ var
   FontRes: TOFDFontResource;
   Path: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   CheckTrue(Assigned(FDoc.ResourceManager), 'ResourceManager exists');
   CheckTrue(FDoc.ResourceManager.FontList.FontCount > 0, 'Font list not empty');
   
@@ -66,6 +79,8 @@ end;
 
 procedure TTestFontChain.TestFontListParsed;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   CheckTrue(FDoc.ResourceManager.FontList.FontCount >= 6,
     Format('Expected at least 6 fonts, got %d', [FDoc.ResourceManager.FontList.FontCount]));
 end;
@@ -75,6 +90,8 @@ var
   FontRes: TOFDFontResource;
   Path: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Font ID "11" is 方正小标宋简体 (FZXiaoBiaoSong-B05S) }
   FontRes := FDoc.ResourceManager.FindFontByID('11');
   CheckTrue(Assigned(FontRes), 'Font ID 11 exists');
@@ -105,6 +122,8 @@ var
   Stream: TStream;
   FaceName: String;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   Stream := FDoc.Package.OpenStream('Doc_0/Res/font1_398.ttf');
   try
     FaceName := ReadTTFName(Stream);
@@ -130,6 +149,8 @@ procedure TTestFontChain.TestFontDataLazyLoadOnRead;
 var
   FontRes: TOFDFontResource;
 begin
+  if OFDSkipMissingSample(cSampleName) then Exit;
+
   { Regression: Open no longer eagerly loads font bytes (A4 lazy). Reading
     FontData through the property must lazily load the bytes from the package
     and mark the resource DataLoaded, so provider-based rendering keeps
@@ -146,5 +167,6 @@ begin
 end;
 
 initialization
+  TestFile := OFDSamplePath(cSampleName);
   RegisterTest(TTestFontChain);
 end.
