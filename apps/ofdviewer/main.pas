@@ -223,6 +223,7 @@ type
     procedure DoScrollDown;
     procedure DoFolderPrev;
     procedure DoFolderNext;
+    procedure UpdateViewChecks;
     procedure DoExternalViewer;
 {$IFDEF DARWIN}
     procedure MagnifyTimerEvent(Sender: TObject);
@@ -1161,12 +1162,17 @@ begin
         end;
       Ord('1'):
         begin
-          DoFitWidth;
+          DoActualSize;
           Key := 0;
         end;
       Ord('2'):
         begin
-          DoActualSize;
+          DoFitWidth;
+          Key := 0;
+        end;
+      Ord('M'):
+        begin
+          MenuViewMenubarClick(Sender);
           Key := 0;
         end;
       Ord('O'):
@@ -1360,6 +1366,9 @@ begin
   MEditSelectAll.Caption := '全选(&A)';
   MEditSelectAll.ShortCut := MakeShortcut(ord('A'), [gModifierKey]);
   MEditSelectAll.OnClick := @MenuEditSelectAllClick;
+  { No text-selection widget yet: Ctrl+C copies the whole page text instead.
+    Disabled so the item is never a dead shortcut. }
+  MEditSelectAll.Enabled := False;
   MEdit.Add(MEditSelectAll);
 
   MEditCopy := TMenuItem.Create(MEdit);
@@ -1414,6 +1423,7 @@ begin
 
   MViewMenubar := TMenuItem.Create(MView);
   MViewMenubar.Caption := '显示菜单栏';
+  MViewMenubar.ShortCut := MakeShortcut(ord('M'), [gModifierKey]);
   MViewMenubar.OnClick := @MenuViewMenubarClick;
   MView.Add(MViewMenubar);
 
@@ -1526,13 +1536,13 @@ begin
 
   MZoomFitWidth := TMenuItem.Create(MZoom);
   MZoomFitWidth.Caption := '适应宽度(&W)';
-  MZoomFitWidth.ShortCut := MakeShortcut(ord('1'), [gModifierKey]);
+  MZoomFitWidth.ShortCut := MakeShortcut(ord('2'), [gModifierKey]);
   MZoomFitWidth.OnClick := @MenuZoomFitWidthClick;
   MZoom.Add(MZoomFitWidth);
 
   MZoomActual := TMenuItem.Create(MZoom);
   MZoomActual.Caption := '实际大小(&A)';
-  MZoomActual.ShortCut := MakeShortcut(ord('2'), [gModifierKey]);
+  MZoomActual.ShortCut := MakeShortcut(ord('1'), [gModifierKey]);
   MZoomActual.OnClick := @MenuZoomActualClick;
   MZoom.Add(MZoomActual);
 
@@ -1664,10 +1674,15 @@ procedure TViewerMainForm.CreateComponents;
 begin
   FOpenDialog := TOpenDialog.Create(Self);
   FOpenDialog.Filter := 'OFD 文件|*.ofd|所有文件|*.*';
+  FOpenDialog.Title := '打开';
   FOpenDialog.Options := [ofReadOnly, ofEnableSizing];
 
   FSaveDialog := TSaveDialog.Create(Self);
-  FSaveDialog.Filter := 'PNG 图片|*.png|BMP 图片|*.bmp|所有文件|*.*';
+  { Only the formats DoSaveAs can actually write. Offering *.* let users type
+    ".pdf" and get a PNG/BMP body with a PDF name (an invalid PDF that shows
+    with a PDF-ish icon in Explorer). }
+  FSaveDialog.Filter := 'PNG 图片|*.png|BMP 图片|*.bmp';
+  FSaveDialog.Title := '另存为';
 
   { 多标签: 自绘标签条 + 内容面板. 每个打开的文档一个标签, 每个标签拥有自己的视图.
     先于工具栏创建, 使工具栏(后创建)位于标签条上方: 布局为 菜单→工具栏→标签→内容. }
@@ -2253,6 +2268,7 @@ begin
     FIsFullscreen := True;
   end;
   UpdateStatusBar;
+  UpdateViewChecks;
   { BorderStyle change may recreate the window handle; re-apply the rounded
     corners for the new handle. }
   ApplyRoundedWindowCorners(Handle);
@@ -2295,6 +2311,16 @@ begin
   FSaveDialog.FileName := ChangeFileExt(ExtractFileName(FFileName), '.png');
   if not FSaveDialog.Execute then Exit;
   SavePath := FSaveDialog.FileName;
+  { Never trust the typed name: force an extension the writer really emits
+    (e.g. a name typed without an extension, or "...pdf" via an exotic path). }
+  if not SameText(ExtractFileExt(SavePath), '.png') and
+     not SameText(ExtractFileExt(SavePath), '.bmp') then
+  begin
+    if FSaveDialog.FilterIndex = 2 then
+      SavePath := SavePath + '.bmp'
+    else
+      SavePath := SavePath + '.png';
+  end;
  PageBmp := FPageView.RenderPageToBitmap;
   if not Assigned(PageBmp) then Exit;
   try
@@ -2462,10 +2488,29 @@ end;
 
 procedure TViewerMainForm.DoSelectAll;
 begin
+  { No text-selection UI in phase 1; the menu item is kept disabled so it
+    never silently does nothing. See DoCopy. }
 end;
 
 procedure TViewerMainForm.DoCopy;
+var
+  Extractor: TOFDTextExtractor;
+  Txt: String;
 begin
+  { SumatraPDF's Edit>Copy with a page-scoped fallback: with no selection UI
+    yet, copy the plain text of the current page. }
+  if not Assigned(FDocument) then Exit;
+  if (FCurrentPage < 0) or (FCurrentPage >= FDocument.PageCount) then Exit;
+  Extractor := TOFDTextExtractor.Create(FDocument);
+  try
+    Txt := Extractor.ExtractPageText(FCurrentPage);
+  finally
+    Extractor.Free;
+  end;
+  if Txt <> '' then
+    Clipboard.AsText := Txt
+  else
+    MessageDlg('当前页无可复制文本', mtInformation, [mbOK], 0);
 end;
 
 procedure TViewerMainForm.DoCopyPath;
@@ -2488,10 +2533,12 @@ begin
   FPageView.ZoomMode := zmFitPage;
   FPageView.ApplyZoomMode;
   FZoomLevel := FPageView.CurrentZoom;
+  UpdateViewChecks;
 end;
 
 procedure TViewerMainForm.DoDoublePage;
 begin
+  if not Assigned(FDocument) then Exit;
   FContinuous := True;
   if Assigned(FDocument) then
   begin
@@ -2501,6 +2548,7 @@ begin
     FDocView.LoadDocument(FDocument);
     FDocView.GoToPage(FCurrentPage);
   end;
+  UpdateViewChecks;
 end;
 
 procedure TViewerMainForm.DoContinuousMode;
@@ -2520,6 +2568,7 @@ begin
     FPageView.Visible := True;
     FDocView.Visible := False;
   end;
+  UpdateViewChecks;
 end;
 
 procedure TViewerMainForm.DoToggleThumbnails;
@@ -2531,6 +2580,21 @@ begin
     FThumbsPanel.Width := 150;
     UpdateThumbnails;
   end;
+  UpdateViewChecks;
+end;
+
+{ Mirror the live UI state onto the check marks of the 查看 menu items. The
+  menu has no Actions, so without this the toggles are invisible and the
+  view-mode items never show which mode is active. }
+procedure TViewerMainForm.UpdateViewChecks;
+begin
+  MViewSinglePage.Checked := not FContinuous;
+  MViewDoublePage.Checked := FContinuous and (FDocView.ViewMode = vmDoublePage);
+  MViewContinuous.Checked := FContinuous and (FDocView.ViewMode = vmContinuous);
+  MViewFullscreen.Checked := FIsFullscreen;
+  MViewToolbar.Checked := FToolbarVisible;
+  MViewMenubar.Checked := Self.Menu <> nil;
+  MViewThumbs.Checked := FShowThumbs;
 end;
 
 procedure TViewerMainForm.DoRotateLeft;
@@ -3064,6 +3128,7 @@ begin
     FStatusBar.SimpleText := PageInfo;
 
     UpdateThumbnails;
+    UpdateViewChecks;
 
     ExportPath := GetEnvironmentVariable('OFD_EXPORT');
     if ExportPath <> '' then
@@ -3221,11 +3286,16 @@ begin
   FToolbar.Visible := FToolbarVisible;
   if FIsFullscreen then
     FToolbar.Visible := False;
+  UpdateViewChecks;
 end;
 
 procedure TViewerMainForm.MenuViewMenubarClick(Sender: TObject);
 begin
+  { Hiding the menu also disables every menu SHORTCUT (LCL resolves them via
+    the form's Menu), so Ctrl+M is handled again in FormKeyDown as a fallback
+    to bring the menu bar back. }
   if Self.Menu <> nil then Self.Menu := nil else Self.Menu := FMainMenu;
+  UpdateViewChecks;
 end;
 
 procedure TViewerMainForm.MenuViewThumbsClick(Sender: TObject);
@@ -3386,10 +3456,12 @@ begin
   Shortcuts := Shortcuts + 'Shift+F3  查找上一个'#13#10;
   Shortcuts := Shortcuts + 'Ctrl+G  转到指定页'#13#10;
   Shortcuts := Shortcuts + 'Ctrl+0  适应页面'#13#10;
-  Shortcuts := Shortcuts + 'Ctrl+1  适应宽度'#13#10;
-  Shortcuts := Shortcuts + 'Ctrl+2  实际大小'#13#10;
+  Shortcuts := Shortcuts + 'Ctrl+1  实际大小'#13#10;
+  Shortcuts := Shortcuts + 'Ctrl+2  适应宽度'#13#10;
   Shortcuts := Shortcuts + 'Ctrl+=  放大'#13#10;
   Shortcuts := Shortcuts + 'Ctrl+-  缩小'#13#10;
+  Shortcuts := Shortcuts + 'Ctrl+C  复制当前页文本'#13#10;
+  Shortcuts := Shortcuts + 'Ctrl+M  显示/隐藏菜单栏'#13#10;
   Shortcuts := Shortcuts + 'F11     全屏'#13#10;
   Shortcuts := Shortcuts + '←/→    上一页/下一页'#13#10;
   Shortcuts := Shortcuts + '↑/↓    滚动'#13#10;

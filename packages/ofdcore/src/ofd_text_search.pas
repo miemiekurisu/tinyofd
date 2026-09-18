@@ -170,11 +170,18 @@ end;
 function TOFDTextExtractor.ExtractAllText: String;
 var
   I: Integer;
+  SB: TStringBuilder;
 begin
   Result := '';
   if not Assigned(FDocument) then Exit;
-  for I := 0 to FDocument.PageCount - 1 do
-    Result := Result + ExtractPageText(I);
+  SB := TStringBuilder.Create;
+  try
+    for I := 0 to FDocument.PageCount - 1 do
+      SB.Append(ExtractPageText(I));
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
 end;
 
 { TOFDTextSearcher }
