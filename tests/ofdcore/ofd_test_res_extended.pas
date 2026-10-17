@@ -4,12 +4,26 @@ unit ofd_test_res_extended;
 interface
 
 uses
-  Classes, SysUtils, fpcunit, testutils, testregistry,
+  Classes, SysUtils, fpcunit, testutils, testregistry, Zipper,
   ofd_document, ofd_resources, ofd_types, ofd_package,
   ofd_test_samples;
 
 type
   TTestOFDResourcesExtended = class(TTestCase)
+  private
+    { Paths of the synthetic package built by BuildPackage; torn down after
+      each test so a crash leaves nothing behind. }
+    FOfdPath: String;
+    FBaseDir: String;
+    procedure WriteTextFile(const AFileName, AContent: String);
+    { Builds a two-entry (plus resources) OFD whose Document.xml declares
+      ACommonDataXml and whose package contains each (AEntryNames[i],
+      AEntryContents[i]) pair. }
+    procedure BuildPackage(const ACommonDataXml: String;
+      const AEntryNames: array of String; const AEntryContents: array of String);
+  protected
+    procedure SetUp; override;
+    procedure TearDown; override;
   published
     procedure TestFontResourceCreate;
     procedure TestFontResourceProperties;
@@ -29,6 +43,15 @@ type
     procedure TestGetOrLoadRawMediaBytes_RealEntry;
     procedure TestGetOrLoadRawMediaBytes_MissingPath;
     procedure TestGetOrLoadRawMediaBytes_PathTraversal;
+    { Regression: root cause #1 of the bugluanma.ofd garble. The resource file
+      name declared in <CommonData> must be honoured; hard-coding
+      "PublicRes.xml" silently dropped every font/image when a producer (e.g.
+      Sursen OFD Writer) wrote "PublicRes_0.xml", and text then rendered with a
+      system-font fallback (garbled). }
+    procedure TestPublicRes_DeclaredNonCanonicalNameIsUsed;
+    procedure TestPublicRes_CanonicalNameIsUsed;
+    procedure TestPublicRes_DeclaredMissingFallsBackToCanonical;
+    procedure TestPublicRes_EmptyDeclarationFallsBackToCanonical;
   end;
 
 implementation
@@ -492,6 +515,170 @@ begin
       Mgr.Free;
     end;
     Doc.Close;
+  finally
+    Doc.Free;
+  end;
+end;
+
+{ ---------- Root cause #1: declared resource file names ----------
+  bugluanma.ofd declares <PublicRes>PublicRes_0.xml</PublicRes>; the old code
+  hard-coded "PublicRes.xml", HasEntry failed, the Parse* calls exited early
+  and every declared font was lost. These tests build synthetic packages, so
+  they run without testfile/ and fail loudly if this regresses again. }
+
+const
+  RES_XML_ONE_FONT =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<ofd:Res xmlns:ofd="http://www.ofdspec.org/2016" BaseLoc="Res">' +
+    '<ofd:Fonts><ofd:Font ID="1" FontName="TestFont"/></ofd:Fonts></ofd:Res>';
+
+  RES_XML_EMPTY =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<ofd:Res xmlns:ofd="http://www.ofdspec.org/2016" BaseLoc="Res"/>';
+
+procedure TTestOFDResourcesExtended.WriteTextFile(const AFileName, AContent: String);
+var
+  FS: TFileStream;
+  B: TBytes;
+begin
+  B := TEncoding.UTF8.GetBytes(AContent);
+  FS := TFileStream.Create(AFileName, fmCreate);
+  try
+    if Length(B) > 0 then
+      FS.WriteBuffer(B[0], Length(B));
+  finally
+    FS.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.BuildPackage(const ACommonDataXml: String;
+  const AEntryNames: array of String; const AEntryContents: array of String);
+var
+  Zip: TZipper;
+  LocalDoc, LocalRes: String;
+  I: Integer;
+begin
+  Assert(Length(AEntryNames) = Length(AEntryContents),
+    'BuildPackage: name/content arrays must have equal length');
+  FBaseDir := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0))) + 'resx_tmp';
+  ForceDirectories(IncludeTrailingPathDelimiter(FBaseDir) + 'Doc_0');
+
+  WriteTextFile(IncludeTrailingPathDelimiter(FBaseDir) + 'OFD.xml',
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" DocType="OFD" Version="1.1">' +
+    '<ofd:DocBody><ofd:DocInfo><ofd:DocID>test-res-extended</ofd:DocID></ofd:DocInfo>' +
+    '<ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot></ofd:DocBody></ofd:OFD>');
+
+  LocalDoc := IncludeTrailingPathDelimiter(FBaseDir) + 'Doc_0' + PathDelim + 'Document.xml';
+  WriteTextFile(LocalDoc,
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">' +
+    '<ofd:CommonData><ofd:MaxUnitID>99</ofd:MaxUnitID>' + ACommonDataXml +
+    '<ofd:PageArea><ofd:PhysicalBox>0 0 210 297</ofd:PhysicalBox></ofd:PageArea>' +
+    '</ofd:CommonData>' +
+    '<ofd:Pages><ofd:Page ID="1" BaseLoc="Pages/Page_0/Content.xml"/></ofd:Pages>' +
+    '</ofd:Document>');
+
+  FOfdPath := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0))) + 'res_extended.ofd';
+  DeleteFile(FOfdPath);
+  Zip := TZipper.Create;
+  try
+    Zip.FileName := FOfdPath;
+    Zip.Entries.AddFileEntry(IncludeTrailingPathDelimiter(FBaseDir) + 'OFD.xml', 'OFD.xml');
+    Zip.Entries.AddFileEntry(LocalDoc, 'Doc_0/Document.xml');
+    for I := 0 to High(AEntryNames) do
+    begin
+      LocalRes := IncludeTrailingPathDelimiter(FBaseDir) + 'Doc_0' + PathDelim +
+        Format('res_%d.xml', [I]);
+      WriteTextFile(LocalRes, AEntryContents[I]);
+      Zip.Entries.AddFileEntry(LocalRes, AEntryNames[I]);
+    end;
+    Zip.ZipAllFiles;
+  finally
+    Zip.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.SetUp;
+begin
+  FOfdPath := '';
+end;
+
+procedure TTestOFDResourcesExtended.TearDown;
+begin
+  if FOfdPath <> '' then
+    DeleteFile(FOfdPath);
+end;
+
+procedure TTestOFDResourcesExtended.TestPublicRes_DeclaredNonCanonicalNameIsUsed;
+var
+  Doc: TOFDDocument;
+begin
+  BuildPackage('<ofd:PublicRes>PublicRes_0.xml</ofd:PublicRes>' +
+               '<ofd:DocumentRes>DocumentRes_0.xml</ofd:DocumentRes>',
+    ['Doc_0/PublicRes_0.xml', 'Doc_0/DocumentRes_0.xml'],
+    [RES_XML_ONE_FONT, RES_XML_EMPTY]);
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(FOfdPath);
+    CheckEquals('Doc_0/PublicRes_0.xml', Doc.PublicResPath, 'declared PublicRes name honoured');
+    CheckEquals('Doc_0/DocumentRes_0.xml', Doc.DocumentResPath, 'declared DocumentRes name honoured');
+    CheckNotNull(Doc.ResourceManager, 'resource manager exists after Open');
+    CheckEquals(1, Doc.ResourceManager.FontList.FontCount,
+      'font declared in PublicRes_0.xml reached the model');
+    CheckNotNull(Doc.ResourceManager.FontList.FindByID('1'),
+      'font id 1 resolvable (pre-fix the FontList stayed empty)');
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestPublicRes_CanonicalNameIsUsed;
+var
+  Doc: TOFDDocument;
+begin
+  BuildPackage('<ofd:PublicRes>PublicRes.xml</ofd:PublicRes>',
+    ['Doc_0/PublicRes.xml'], [RES_XML_ONE_FONT]);
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(FOfdPath);
+    CheckEquals('Doc_0/PublicRes.xml', Doc.PublicResPath, 'canonical name unchanged');
+    CheckNotNull(Doc.ResourceManager.FontList.FindByID('1'), 'canonical package still parses');
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestPublicRes_DeclaredMissingFallsBackToCanonical;
+var
+  Doc: TOFDDocument;
+begin
+  { The declared entry is absent from the package: the resolver must fall back
+    to the canonical file in the document directory instead of returning a
+    path that cannot be opened. }
+  BuildPackage('<ofd:PublicRes>PublicRes_0.xml</ofd:PublicRes>',
+    ['Doc_0/PublicRes.xml'], [RES_XML_ONE_FONT]);
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(FOfdPath);
+    CheckEquals('Doc_0/PublicRes.xml', Doc.PublicResPath, 'missing declared file falls back');
+    CheckNotNull(Doc.ResourceManager.FontList.FindByID('1'), 'fallback file still parsed');
+  finally
+    Doc.Free;
+  end;
+end;
+
+procedure TTestOFDResourcesExtended.TestPublicRes_EmptyDeclarationFallsBackToCanonical;
+var
+  Doc: TOFDDocument;
+begin
+  { No <PublicRes> element at all (older producers omit it). }
+  BuildPackage('', ['Doc_0/PublicRes.xml'], [RES_XML_ONE_FONT]);
+  Doc := TOFDDocument.Create;
+  try
+    Doc.Open(FOfdPath);
+    CheckEquals('Doc_0/PublicRes.xml', Doc.PublicResPath, 'empty declaration falls back');
+    CheckNotNull(Doc.ResourceManager.FontList.FindByID('1'), 'default name still parsed');
   finally
     Doc.Free;
   end;

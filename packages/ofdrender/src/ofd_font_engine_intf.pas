@@ -40,7 +40,8 @@ type
     function OpenMemoryFace(const AFontBytes: TBytes;
       const AResourceKey: AnsiString): IOFDFontFace;
     function ResolveSystemFont(const AFamilyName: UnicodeString;
-      const AStyle: TOFDFontStyles): IOFDFontFace;
+      const AStyle: TOFDFontStyles;
+      AAllowGenericCJKFallback: Boolean): IOFDFontFace;
   end;
 
   { Font data provider interface - allows resolving font IDs to font bytes

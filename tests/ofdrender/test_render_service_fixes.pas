@@ -6,7 +6,7 @@ interface
 uses
   Classes, SysUtils, Math, fpcunit, testutils, testregistry,
   ofd_types, ofd_canvas_intf, ofd_surface, ofd_compositor, ofd_display_list, ofd_ttf_glyf,
-  ofd_font_engine_intf, ofd_ft2_engine, ofd_render_service;
+  ofd_font_engine_intf, ofd_ft2_engine, ofd_render_service, ofd_glyphrun;
 
 type
   TTestRenderServiceFixes = class(TTestCase)
@@ -62,6 +62,13 @@ type
 
     { Regression: broken font data must resolve to nil, not a blank face. }
     procedure TestFT2Engine_BadFontReturnsNil;
+
+    { Bug #3: a font that is neither embedded nor matched by a system font must
+      render placeholder boxes for Unicode-scalar runs (generic CJK fallback),
+      never silent blanks, and must not be substituted for glyph-index runs. }
+    procedure TestResolveSystemFont_UnknownFamily_NoFallbackReturnsNil;
+    procedure TestResolveSystemFont_UnknownFamily_GenericCJKFallback;
+    procedure TestUnavailableFont_GlyphRunDrawsPlaceholders;
 
     { Audit: malformed out-of-range color/alpha must clamp, not wrap in Byte }
     procedure TestColorComponentOutOfRangeClamped;
@@ -1610,6 +1617,175 @@ begin
     CheckTrue(R = 255, Format('Negative shading alpha must draw nothing, R=%d', [R]));
   finally
     S.Free;
+  end;
+end;
+
+type
+  { Font provider for a document whose font is neither embedded nor present as
+    a matched system font: no bytes (< 12 -> name lookup) and no name
+    (-> no system substitution -> the render service must fall back to
+    placeholder boxes). }
+  TUnavailableFontProvider = class(TInterfacedObject, IOFDFontDataProvider)
+    { ofd_font_engine_intf declares this interface in {$mode delphiunicode},
+      so String resolves to UnicodeString there; match it exactly. }
+    function GetFontData(const AFontID: UnicodeString): TBytes;
+    function GetFontName(const AFontID: UnicodeString): UnicodeString;
+  end;
+
+function TUnavailableFontProvider.GetFontData(const AFontID: UnicodeString): TBytes;
+begin
+  Result := nil;
+  SetLength(Result, 0);
+end;
+
+function TUnavailableFontProvider.GetFontName(const AFontID: UnicodeString): UnicodeString;
+begin
+  Result := '';
+end;
+
+procedure TTestRenderServiceFixes.TestResolveSystemFont_UnknownFamily_NoFallbackReturnsNil;
+var
+  Engine: TOFDFT2FontEngine;
+begin
+  { A family that matches nothing must stay nil when the caller has not
+    declared the run as pure Unicode scalar text. }
+  Engine := TOFDFT2FontEngine.Create;
+  try
+    CheckFalse(Assigned(Engine.ResolveSystemFont('TotallyUnknownFamily_XYZ', [], False)),
+      'Unmatched family without generic CJK fallback must return nil');
+  finally
+    Engine.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestResolveSystemFont_UnknownFamily_GenericCJKFallback;
+var
+  Engine: TOFDFT2FontEngine;
+  FontsDir: String;
+  HasCJK: Boolean;
+begin
+  { With the fallback allowed, an unmatched family resolves to an installed
+    CJK font when the platform has one. Environments without any candidate
+    font cannot assert the positive case and are skipped. }
+  {$IFDEF MSWINDOWS}
+  FontsDir := GetEnvironmentVariable('SystemRoot') + '\Fonts\';
+  HasCJK := FileExists(FontsDir + 'simsun.ttc') or FileExists(FontsDir + 'simsunb.ttf') or
+            FileExists(FontsDir + 'simhei.ttf') or FileExists(FontsDir + 'msyh.ttc');
+  {$ELSE}
+  FontsDir := '/usr/share/fonts/';
+  HasCJK := FileExists(FontsDir + 'opentype/noto/NotoSansCJK-Regular.ttc') or
+            FileExists(FontsDir + 'truetype/noto/NotoSansCJK-Regular.ttc') or
+            FileExists(FontsDir + 'truetype/arphic/uming.ttc');
+  {$ENDIF}
+  if not HasCJK then Exit;
+
+  Engine := TOFDFT2FontEngine.Create;
+  try
+    CheckTrue(Assigned(Engine.ResolveSystemFont('TotallyUnknownFamily_XYZ', [], True)),
+      'Generic CJK fallback must substitute an installed CJK font');
+  finally
+    Engine.Free;
+  end;
+end;
+
+procedure TTestRenderServiceFixes.TestUnavailableFont_GlyphRunDrawsPlaceholders;
+const
+  { Verified by _tmp/calc_placeholder_bbox.py: page 20mm x 20mm at 96 DPI,
+    zoom 1.0, FontSize 10mm, glyph origin (5,15) mm
+    -> PX=19, PY=57, PS=38, Thickness=2, ink bbox x[18,57] y[18,57]. }
+  EXPECT_PX = 19;
+  EXPECT_PY = 57;
+  EXPECT_PS = 38;
+  TOL = 3;
+var
+  Service: TOFDRenderService;
+  Provider: IOFDFontDataProvider;
+  DL: TOFDDisplayList;
+  Surface: TOFDSurface;
+  GlyphRun: TOFDGlyphRun;
+  Place: TOFDGlyphPlacement;
+  B, G, R, A: Byte;
+  X, Y: Integer;
+  MinX, MinY, MaxX, MaxY: Integer;
+  Found: Boolean;
+  InkRed: Boolean;
+begin
+  { Regression for bug #3: a glyph-index run whose font is unavailable must
+    draw visible placeholder boxes (frame + X cross), not blank text and not a
+    wrong substituted glyph. }
+  Service := TOFDRenderService.Create;
+  try
+    Service.Diagnostics := False;
+    Provider := TUnavailableFontProvider.Create;
+    Service.FontDataProvider := Provider;
+    DL := TOFDDisplayList.Create;
+    try
+      GlyphRun := TOFDGlyphRun.Create;
+      GlyphRun.ObjectID := 'txt_bug3';
+      GlyphRun.FontID := '1';
+      GlyphRun.FontSize := 10;                  { mm }
+      GlyphRun.FillColor := RGBColor(1, 0, 0);  { non-zero to avoid all-zero fallback }
+      ClearGlyphPlacement(Place);
+      Place.KeyKind := gkkGlyphIndex;      { authoritative glyph index }
+      Place.GlyphID := 7;
+      Place.X := 5;
+      Place.Y := 15;
+      GlyphRun.AddGlyph(Place);
+      DL.AddGlyphRun(GlyphRun, RGBColor(1, 0, 0), 1.0);  { the command owns the run }
+      Surface := Service.RenderDisplayList(DL, 20, 20, 96, 1);
+    finally
+      DL.Free;
+    end;
+    try
+      MinX := MaxInt; MinY := MaxInt; MaxX := -1; MaxY := -1;
+      Found := False;
+      for Y := 0 to Surface.Height - 1 do
+        for X := 0 to Surface.Width - 1 do
+        begin
+          Surface.ReadPixel(X, Y, B, G, R, A);
+          if (R > 200) and (G < 80) and (B < 80) then
+          begin
+            Found := True;
+            if X < MinX then MinX := X;
+            if Y < MinY then MinY := Y;
+            if X > MaxX then MaxX := X;
+            if Y > MaxY then MaxY := Y;
+          end;
+        end;
+
+      CheckTrue(Found, 'Unavailable font must draw placeholder glyph boxes');
+      CheckTrue((MinX >= EXPECT_PX - TOL) and (MaxX <= EXPECT_PX + EXPECT_PS + TOL),
+        Format('Placeholder X span [%d,%d] outside [%d,%d]',
+          [MinX, MaxX, EXPECT_PX - TOL, EXPECT_PX + EXPECT_PS + TOL]));
+      CheckTrue((MinY >= EXPECT_PY - EXPECT_PS - TOL) and (MaxY <= EXPECT_PY + TOL),
+        Format('Placeholder Y span [%d,%d] outside [%d,%d]',
+          [MinY, MaxY, EXPECT_PY - EXPECT_PS - TOL, EXPECT_PY + TOL]));
+
+      { Frame corners and mid-edges must carry ink (box outline + X cross). }
+      Surface.ReadPixel(EXPECT_PX, EXPECT_PY - EXPECT_PS, B, G, R, A);
+      InkRed := (R > 200) and (G < 80) and (B < 80);
+      CheckTrue(InkRed, 'Top-left frame corner must have ink');
+      Surface.ReadPixel(EXPECT_PX + EXPECT_PS, EXPECT_PY - EXPECT_PS, B, G, R, A);
+      InkRed := (R > 200) and (G < 80) and (B < 80);
+      CheckTrue(InkRed, 'Top-right frame corner must have ink');
+      Surface.ReadPixel(EXPECT_PX, EXPECT_PY, B, G, R, A);
+      InkRed := (R > 200) and (G < 80) and (B < 80);
+      CheckTrue(InkRed, 'Bottom-left frame corner must have ink');
+      Surface.ReadPixel(EXPECT_PX + EXPECT_PS, EXPECT_PY, B, G, R, A);
+      InkRed := (R > 200) and (G < 80) and (B < 80);
+      CheckTrue(InkRed, 'Bottom-right frame corner must have ink');
+      Surface.ReadPixel(EXPECT_PX + EXPECT_PS div 2, EXPECT_PY - EXPECT_PS, B, G, R, A);
+      InkRed := (R > 200) and (G < 80) and (B < 80);
+      CheckTrue(InkRed, 'Top edge mid must have ink (X cross)');
+
+      { A pixel far from the frame stays white. }
+      Surface.ReadPixel(2, 2, B, G, R, A);
+      CheckTrue((R > 200) and (G > 200) and (B > 200), 'Empty page corner must stay white');
+    finally
+      Surface.Free;
+    end;
+  finally
+    Service.Free;
   end;
 end;
 

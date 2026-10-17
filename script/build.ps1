@@ -154,6 +154,66 @@ $exeCandidates = @(
 )
 $foundExe = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
+# --- 构建 ofd_av_test (渲染诊断/截图工具) -------------------------------------
+# apps\ofdviewer\src\ofd_av_test.lpr 用于把 OFD 渲染为 BMP 并输出诊断日志,
+# 是 §9.8 GUI 视觉测试的前置工具。输出 _tmp\build\ofd_av_test.exe。
+$AvTestSrc = Join-Path $PROJECT_DIR 'apps\ofdviewer\src\ofd_av_test.lpr'
+if (Test-Path $AvTestSrc) {
+    $LAZ_ROOT  = Split-Path -Parent $LAZBUILD
+    $cpuOs     = 'x86_64-win64'
+    $LCL_UNITS = Join-Path $LAZ_ROOT "lcl\units\$cpuOs"
+    $LCL_WIN32 = Join-Path $LCL_UNITS 'win32'
+    $LAZUTILS  = Join-Path $LAZ_ROOT "components\lazutils\lib\$cpuOs"
+    $FPC_ROOT  = $env:FPC_DIR
+    if (-not $FPC_ROOT) { $FPC_ROOT = Join-Path $LAZ_ROOT 'fpc\3.2.2' }
+    if (-not (Test-Path $FPC_ROOT)) {
+        $verDir = Get-ChildItem (Join-Path $LAZ_ROOT 'fpc') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($verDir) { $FPC_ROOT = $verDir.FullName }
+    }
+    $FPC_UNITS = Join-Path $FPC_ROOT "units\$cpuOs"
+    $FPC_IMAGE = Join-Path $FPC_UNITS 'fcl-image'
+    $FT_COMP   = Join-Path $LAZ_ROOT 'components\freetype'
+    $FT_LIB    = Join-Path $FT_COMP "lib\$cpuOs"
+
+    $AV_FPC = $FPC
+    if (-not $AV_FPC -or -not (Test-Path $AV_FPC)) {
+        $AV_FPC = Join-Path $FPC_ROOT "bin\$cpuOs\fpc.exe"
+    }
+    if (-not (Test-Path $AV_FPC)) {
+        Write-Err "未找到 fpc.exe，跳过 ofd_av_test 构建。"
+    } else {
+        $avArgs = @('-MObjFpc', '-O1', '-dDEBUG')
+        foreach ($p in @(
+            (Join-Path $PROJECT_DIR 'packages\ofdcore\src'),
+            (Join-Path $PROJECT_DIR 'packages\ofdrender\src'),
+            $LCL_UNITS, $LCL_WIN32, $LAZUTILS,
+            $FPC_UNITS, $FPC_IMAGE, $FT_COMP, $FT_LIB
+        )) { if (Test-Path $p) { $avArgs += "-Fu$p" } }
+        $FTBuild = Join-Path $PROJECT_DIR '_tmp\vendor\freetype\build'
+        if (Test-Path $FTBuild) { $avArgs += "-Fl$FTBuild" }
+        if ($env:MINGW_DIR -and (Test-Path (Join-Path $env:MINGW_DIR 'lib'))) {
+            $avArgs += "-Fl$(Join-Path $env:MINGW_DIR 'lib')"
+            $mingwArch = Get-ChildItem (Join-Path $env:MINGW_DIR 'lib\gcc') -Directory -Filter 'x86_64-w64-mingw32' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($mingwArch) {
+                $gccVer = Get-ChildItem $mingwArch.FullName -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object { [int]($_.Name -split '[._]')[0] } -Descending | Select-Object -First 1
+                if ($gccVer) { $avArgs += "-Fl$($gccVer.FullName)" }
+            }
+        }
+        $avArgs += "-FU$BUILD_DIR"
+        $avArgs += "-FE$BUILD_DIR"
+        $avArgs += $AvTestSrc
+        Write-Log "Building $AvTestSrc ..."
+        $avOut = (& $AV_FPC @avArgs 2>&1 | Out-String)
+        Add-Content -Path $BUILD_LOG -Value $avOut
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "FAILED: ofd_av_test.lpr (exit $LASTEXITCODE)"
+        } else {
+            Write-Log "OK: $BUILD_DIR\ofd_av_test.exe"
+        }
+    }
+}
+
 Write-Log '========== Build Complete =========='
 if ($foundExe) {
     $size = [math]::Round((Get-Item $foundExe).Length / 1MB, 2)

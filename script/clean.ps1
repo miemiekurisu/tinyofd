@@ -34,10 +34,14 @@ if (Test-Path $COVERAGE_DIR) {
     Write-Host "Removed $COVERAGE_DIR" -ForegroundColor Gray
 }
 
-# 清理源码目录中的编译产物
-Get-ChildItem -Path . -Include *.ppu,*.o,*.compiled,*.obj -Recurse -Exclude "_tmp" | ForEach-Object {
-    Remove-Item -Path $_.FullName -Force
-    Write-Host "Cleaned: $($_.FullName)" -ForegroundColor Gray
-}
+# 清理源码目录中的编译产物。
+# 注意: -Exclude 只匹配叶子名称, 写成 -Exclude "_tmp" 并不能跳过 _tmp 子树,
+# 会连 _tmp/vendor 里的第三方构建中间产物一起删掉。这里按完整路径过滤。
+Get-ChildItem -Path . -Include *.ppu,*.o,*.compiled,*.obj -Recurse |
+    Where-Object { $_.FullName -notmatch '[\\/]_tmp[\\/]' } |
+    ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName
+        Write-Host "Cleaned: $($_.FullName)" -ForegroundColor Gray
+    }
 
 Write-Host "=== Cleanup Complete ===" -ForegroundColor Green

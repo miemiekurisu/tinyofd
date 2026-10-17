@@ -59,7 +59,8 @@ type
     function OpenMemoryFace(const AFontBytes: TBytes;
       const AResourceKey: AnsiString): IOFDFontFace;
     function ResolveSystemFont(const AFamilyName: UnicodeString;
-      const AStyle: TOFDFontStyles): IOFDFontFace;
+      const AStyle: TOFDFontStyles;
+      AAllowGenericCJKFallback: Boolean): IOFDFontFace;
   end;
 
 implementation
@@ -392,7 +393,8 @@ begin
 end;
 
 function TOFDFT2FontEngine.ResolveSystemFont(
-  const AFamilyName: UnicodeString; const AStyle: TOFDFontStyles): IOFDFontFace;
+  const AFamilyName: UnicodeString; const AStyle: TOFDFontStyles;
+  AAllowGenericCJKFallback: Boolean): IOFDFontFace;
 var
   SystemFontPath: String;
   Stream: TFileStream;
@@ -408,6 +410,19 @@ var
     Result := FileExists(FullPath);
     if Result then
       SystemFontPath := FullPath;
+  end;
+
+  function FirstExistingOf(const APaths: array of String): String;
+  var
+    K: Integer;
+  begin
+    Result := '';
+    for K := Low(APaths) to High(APaths) do
+      if FileExists(APaths[K]) then
+      begin
+        Result := APaths[K];
+        Exit;
+      end;
   end;
 
   function LoadFile(const APath: String): TBytes;
@@ -471,10 +486,34 @@ begin
     SystemFontPath := '';
 {$ENDIF}
 
-  { NOTE: No generic CJK fallback here. If the exact requested font is not
-    embedded and not resolvable by name, we return nil so the renderer draws
-    placeholders instead of silently substituting an unrelated font (which would
-    render e.g. Tamil glyph indices with a CJK font at wrong positions). }
+  { No exact match by name. Gated generic CJK fallback: only when the caller
+    declares the whole glyph run is real Unicode scalar text, where resolving
+    through the substituted font's cmap cannot misplace glyphs. Runs carrying
+    authoritative glyph indices are never remapped, so the engine is not asked
+    to substitute for them (the renderer draws placeholders instead). }
+  if (SystemFontPath = '') and AAllowGenericCJKFallback then
+  begin
+    {$IFDEF DARWIN}
+    SystemFontPath := FirstExistingOf([
+      '/System/Library/Fonts/PingFang.ttc',
+      '/System/Library/Fonts/Supplemental/Songti.ttc',
+      '/System/Library/Fonts/Hiragino Sans GB.ttc']);
+    {$ELSE}
+    {$IFDEF MSWINDOWS}
+    SystemFontPath := FirstExistingOf([
+      FontsDir + 'simsun.ttc',
+      FontsDir + 'simsunb.ttf',
+      FontsDir + 'simhei.ttf',
+      FontsDir + 'msyh.ttc']);
+    {$ELSE}
+    SystemFontPath := FirstExistingOf([
+      '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+      '/usr/share/fonts/truetype/arphic/uming.ttc']);
+    {$ENDIF}
+    {$ENDIF}
+  end;
+
   if (SystemFontPath = '') or (not FileExists(SystemFontPath)) then
   begin
     Result := nil;

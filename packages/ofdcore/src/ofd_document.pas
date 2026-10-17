@@ -94,6 +94,12 @@ type
     FTemplateCache: TTemplateCacheManager;
      { GAP-19: Signature stamp parsing (骑缝章 seal across pages) }
     FSignaturesPath: String;
+    { Resource file names as declared in Document.xml <CommonData>. They are
+      NOT always the canonical "PublicRes.xml"/"DocumentRes.xml"; some
+      producers (e.g. Sursen OFD Writer) emit "PublicRes_0.xml". Hard-coding
+      the canonical name silently lost every font/image declared there. }
+    FPublicResName: String;
+    FDocumentResName: String;
     FSignatureStamps: TDictionary<String, Contnrs.TObjectList>;
     { Cache of CompositeGraphicUnit <Content> nodes, keyed by resource ID.
       DocumentRes.xml (often hundreds of KB) is parsed once; each composite
@@ -121,6 +127,14 @@ type
       AList: Contnrs.TObjectList);
      procedure LoadResources;
      procedure ParseTemplateList;
+    { Turn a resource file name declared in Document.xml into a package-internal
+      path: a leading '/' means package-root relative, otherwise the name is
+      relative to the document directory. Falls back to the canonical file name
+      in the document directory when the declared path is missing from the
+      package. }
+    function ResolveResFilePath(const ADeclared, ADefaultName: String): String;
+    function GetPublicResPath: String;
+    function GetDocumentResPath: String;
    public
     constructor Create;
     destructor Destroy; override;
@@ -136,6 +150,10 @@ type
      function GetTemplateBaseLoc(const ATemplateID: String): String;
      property Diagnostics: IOFDDiagnostic read FDiagnostics;
     property Package: TOFDPackage read FPackage;
+    { Package-internal paths of the resource files declared in Document.xml,
+      resolved to an existing entry where possible. }
+    property PublicResPath: String read GetPublicResPath;
+    property DocumentResPath: String read GetDocumentResPath;
     property Outline: TOFDOutline read FOutline;
     property Permissions: TOFDDocumentPermissions read FPermissions;
     function GetAnnotationXML(const APageID: String): String;
@@ -203,6 +221,8 @@ begin
     FTemplates := TDictionary<String, String>.Create;
     FAnnotationXMLs := TDictionary<String, String>.Create;
     FSignaturesPath := '';
+    FPublicResName := '';
+    FDocumentResName := '';
     FSignatureStamps := TDictionary<String, TObjectList>.Create;
     FCguNodeCache := TDictionary<String, TOFDXMLNode>.Create;
     FCguParser := nil;
@@ -352,6 +372,8 @@ begin
   FTemplates.Clear;
   FAnnotationXMLs.Clear;
   FSignaturesPath := '';
+  FPublicResName := '';
+  FDocumentResName := '';
   if Assigned(FSignatureStamps) then
   begin
     { TDictionary value is an owned TObjectList; free each before clearing. }
@@ -452,15 +474,11 @@ begin
   begin
     PublicResNode := CommonDataNode.FindChild('PublicRes');
     if Assigned(PublicResNode) then
-    begin
-      { 记录公共资源路径 }
-    end;
+      FPublicResName := Trim(PublicResNode.TextContent);
 
     DocResNode := CommonDataNode.FindChild('DocumentRes');
     if Assigned(DocResNode) then
-    begin
-      { 记录文档资源路径 }
-    end;
+      FDocumentResName := Trim(DocResNode.TextContent);
 
     VersionNode := CommonDataNode.FindChild('Version');
     if Assigned(VersionNode) then
@@ -468,6 +486,46 @@ begin
       FDocumentEntry.Version := VersionNode.TextContent;
     end;
   end;
+end;
+
+function TOFDDocument.ResolveResFilePath(const ADeclared, ADefaultName: String): String;
+var
+  Declared: String;
+begin
+  Declared := Trim(ADeclared);
+  while (Declared <> '') and (Declared[1] = '/') do
+    Declared := Copy(Declared, 2, Length(Declared) - 1);
+
+  if Declared = '' then
+    Result := ''
+  else if Pos('/', Declared) > 0 then
+    { Package-root relative, e.g. "Doc_0/PublicRes_0.xml". }
+    Result := Declared
+  else if FDocumentID <> '' then
+    Result := FDocumentID + '/' + Declared
+  else
+    Result := Declared;
+
+  if (Result <> '') and Assigned(FPackage) and FPackage.IsOpen
+     and FPackage.HasEntry(Result) then
+    Exit;
+
+  { Declared name absent (or package not open): fall back to the canonical
+    file name inside the document directory. }
+  if FDocumentID <> '' then
+    Result := FDocumentID + '/' + ADefaultName
+  else
+    Result := 'Doc_0/' + ADefaultName;
+end;
+
+function TOFDDocument.GetPublicResPath: String;
+begin
+  Result := ResolveResFilePath(FPublicResName, 'PublicRes.xml');
+end;
+
+function TOFDDocument.GetDocumentResPath: String;
+begin
+  Result := ResolveResFilePath(FDocumentResName, 'DocumentRes.xml');
 end;
 
 procedure TOFDDocument.ParseDocumentPermissions;
@@ -686,24 +744,20 @@ begin
     if FCguParsed then Exit;
     FCguParsed := True;
 
-    { Read DocumentRes.xml (or fall back to PublicRes.xml). }
+    { Read the document resource file, falling back to the public one. Both
+      paths come from Document.xml, so non-canonical names such as
+      PublicRes_0.xml resolve correctly. }
     XML := '';
-    DocResPath := FDocumentID + '/DocumentRes.xml';
-    if (FDocumentID <> '') and FPackage.HasEntry(DocResPath) then
+    DocResPath := DocumentResPath;
+    if (DocResPath <> '') and FPackage.HasEntry(DocResPath) then
     begin
       try XML := FPackage.ReadAsString(DocResPath); except XML := ''; end;
     end;
     if XML = '' then
     begin
-      try XML := FPackage.ReadAsString('Doc_0/DocumentRes.xml'); except XML := ''; end;
-    end;
-    if XML = '' then
-    begin
-      PubResPath := FDocumentID + '/PublicRes.xml';
-      if (FDocumentID <> '') and FPackage.HasEntry(PubResPath) then
+      PubResPath := PublicResPath;
+      if (PubResPath <> '') and FPackage.HasEntry(PubResPath) then
         try XML := FPackage.ReadAsString(PubResPath); except XML := ''; end;
-      if XML = '' then
-        try XML := FPackage.ReadAsString('Doc_0/PublicRes.xml'); except XML := ''; end;
     end;
     if XML = '' then Exit;
 

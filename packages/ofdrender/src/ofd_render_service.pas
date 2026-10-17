@@ -139,7 +139,8 @@ type
       var ARendered, AFailed: Integer): Boolean;
     function RenderDisplayListCommands(ADL: TOFDDisplayList; AOutcome: TOFDRenderOutcome;
       var ARendered, AFailed: Integer): Boolean;
-    function GetFontFace(const AFontID: String): IOFDFontFace;
+    function GetFontFace(const AFontID: String;
+      AAllowGenericCJKFallback: Boolean): IOFDFontFace;
     function GetCachedGlyphOutline(const AFontID: String; AGlyphIdx: Cardinal;
       AFace: IOFDFontFace; var ACommands: TOFDPathCommands): Boolean;
     procedure RenderGlyphOutlineCached(const AFontID: String; AGlyphIdx: Cardinal;
@@ -742,7 +743,8 @@ begin
   end;
 end;
 
-function TOFDRenderService.GetFontFace(const AFontID: String): IOFDFontFace;
+function TOFDRenderService.GetFontFace(const AFontID: String;
+  AAllowGenericCJKFallback: Boolean): IOFDFontFace;
 var
   FontData: TBytes;
   FontName: String;
@@ -763,7 +765,10 @@ begin
     if FontName <> '' then
     begin
       if FDiagnostics then FDiagnosticsOutput.Add(Format('    GetFontFace(%s): trying system font "%s"', [AFontID, FontName]));
-      FontHash := 'sys:' + FontName;
+      if AAllowGenericCJKFallback then
+        FontHash := 'sys*:' + FontName
+      else
+        FontHash := 'sys:' + FontName;
       I := FFontCacheKeys.IndexOf(FontHash);
       if I >= 0 then
       begin
@@ -778,7 +783,7 @@ begin
         if FDiagnostics then FDiagnosticsOutput.Add(Format('    GetFontFace(%s): system font from cache', [AFontID]));
         Exit;
       end;
-      Result := FFontEngine.ResolveSystemFont(FontName, []);
+      Result := FFontEngine.ResolveSystemFont(FontName, [], AAllowGenericCJKFallback);
       if Assigned(Result) then
       begin
         Entry := TOFDFontFaceCacheEntry.Create(Result);
@@ -939,6 +944,7 @@ var
   UnitsPerEm: Cardinal;
   SizePx: Integer;
   GlyphGrayOK: Boolean;
+  AllUnicodeScalar: Boolean;
 begin
   if not Assigned(Cmd) or not Assigned(Cmd.GlyphRun) then Exit;
   GlyphRun := Cmd.GlyphRun;
@@ -965,10 +971,19 @@ begin
     Exit;
   end;
 
-  { Get font face. If the requested font is unavailable (not embedded and not a
-    resolvable system font), render placeholders instead of silently skipping or
-    using a wrong substitute that would draw wrong glyphs at wrong positions. }
-  Face := GetFontFace(GlyphRun.FontID);
+  { Get font face. A generic CJK fallback is only allowed when every glyph in
+    this run is a real Unicode scalar: those resolve through the substituted
+    font's cmap, so substitution cannot misplace glyphs. Runs carrying
+    authoritative glyph indices are never remapped by an unrelated font and keep
+    the strict nil path, where the renderer draws placeholders instead. }
+  AllUnicodeScalar := True;
+  for I := 0 to GlyphRun.GlyphCount - 1 do
+    if GlyphRun.Glyphs[I].KeyKind <> gkkUnicodeScalar then
+    begin
+      AllUnicodeScalar := False;
+      Break;
+    end;
+  Face := GetFontFace(GlyphRun.FontID, AllUnicodeScalar);
   if not Assigned(Face) then
   begin
     if FDiagnostics then
@@ -976,10 +991,6 @@ begin
     RenderGlyphPlaceholders(GlyphRun, Color, A);
     Exit;
   end;
-  if FDiagnostics and (GlyphRun.FontID = '2') then
-    FDiagnosticsOutput.Add(Format('    DIAG face font=2: UnitsPerEm=%d GlyphCount=%d cmap91CD=%d',
-      [Face.GetUnitsPerEm, Face.GetGlyphCount, Face.CharCodeToGlyphIndex($91CD)]));
-
   { OFD FontSize is in mm (NOT points). Convert font units → mm:
     1 em = FontSize mm. UnitsPerEm is the font's internal unit grid.
     The CTM (FState.Transform) already has mm→pixel scale,

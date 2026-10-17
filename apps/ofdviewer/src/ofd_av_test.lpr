@@ -178,6 +178,7 @@ begin
                   Svc := TOFDRenderService.Create;
                   try
                     Svc.FontDataProvider := TAVFontProvider.Create(Doc);
+                    Svc.Diagnostics := True;
                     Surface := Svc.RenderDisplayList(DisplayList,
                       Page.Width, Page.Height, RenderDPI, 1.0);
                     try
@@ -187,6 +188,7 @@ begin
                       finally
                         RenderedBmp.Free;
                       end;
+                      WriteLn(Svc.GetDiagnosticsOutput);
                     finally
                       Surface.Free;
                     end;

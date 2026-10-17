@@ -529,10 +529,13 @@ var
   LDoc: TOFDDocument;
 begin
   LDoc := TOFDDocument(FDocument);
-  if LDoc.DocumentID = '' then
-    BaseLoc := 'Doc_0/PublicRes.xml'
-  else
-    BaseLoc := LDoc.DocumentID + '/PublicRes.xml';
+  { Honour the file name declared in Document.xml <CommonData>/<PublicRes>.
+    Some producers emit "PublicRes_0.xml"; hard-coding "PublicRes.xml" made
+    Parse exit immediately, so every font/image declared there was lost and
+    text rendered with a system-font fallback (garbled). }
+  BaseLoc := LDoc.PublicResPath;
+  if BaseLoc = '' then
+    Exit;
 
   FFonts.Parse(BaseLoc);
   { Parse MultiMedias images too (e.g. a background image in PublicRes.xml). }
@@ -546,10 +549,8 @@ var
   LDoc: TOFDDocument;
 begin
   LDoc := TOFDDocument(FDocument);
-  if LDoc.DocumentID = '' then
-    ResFilePath := 'Doc_0/DocumentRes.xml'
-  else
-    ResFilePath := LDoc.DocumentID + '/DocumentRes.xml';
+  { Same as ParsePublicResources: use the declared DocumentRes file name. }
+  ResFilePath := LDoc.DocumentResPath;
 
   if not LDoc.Package.HasEntry(ResFilePath) then
     Exit;
