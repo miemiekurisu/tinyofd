@@ -139,9 +139,9 @@ samples live outside the tree.
 ## 发布产物 / Releases
 
 > 正式安装包发布在 **GitHub Releases**：<https://github.com/miemiekurisu/tinyofd/releases>。
-> 当前版本 **v0.0.3**，提供 Windows (x64) 便携版 zip（`tinyofd-win64-<version>-<date>.zip`，解压即用，无需安装）。
+> 当前版本 **v0.0.4**，提供 Windows (x64) 便携版 zip（`tinyofd-win64-<version>-<date>.zip`，解压即用，无需安装）。
 > Releases are published on **GitHub Releases**: <https://github.com/miemiekurisu/tinyofd/releases>.
-> Current version **v0.0.3**, Windows (x64) portable zip (`tinyofd-win64-<version>-<date>.zip`; extract and run, no install needed).
+> Current version **v0.0.4**, Windows (x64) portable zip (`tinyofd-win64-<version>-<date>.zip`; extract and run, no install needed).
 >
 > 仓库内 `release/` 目录仅为早期版本存档，不再更新。
 > The in-repo `release/` folder is a legacy archive and no longer updated.

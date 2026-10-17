@@ -8,7 +8,7 @@ unit ofd_version;
 interface
 
 const
-  OFD_APP_VERSION = '0.0.3';
+  OFD_APP_VERSION = '0.0.4';
 
 implementation
 

@@ -1,8 +1,8 @@
 1 ICON "ofdviewer.ico"
 
 1 VERSIONINFO
-FILEVERSION     0,0,2,0
-PRODUCTVERSION  0,0,2,0
+FILEVERSION     0,0,4,0
+PRODUCTVERSION  0,0,4,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          0x40004L
@@ -15,12 +15,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "TinyOFD"
       VALUE "FileDescription", "TinyOFD OFD Viewer"
-      VALUE "FileVersion", "0.0.3"
+      VALUE "FileVersion", "0.0.4"
       VALUE "InternalName", "ofdviewer"
       VALUE "LegalCopyright", "Copyright (c) TinyOFD"
       VALUE "OriginalFilename", "ofdviewer.exe"
       VALUE "ProductName", "TinyOFD OFD Viewer"
-      VALUE "ProductVersion", "0.0.3"
+      VALUE "ProductVersion", "0.0.4"
     END
   END
   BLOCK "VarFileInfo"
