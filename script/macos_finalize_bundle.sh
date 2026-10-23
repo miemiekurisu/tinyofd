@@ -117,15 +117,48 @@ if [ "${OFD_STRIP_BUNDLE:-0}" = "1" ] && command -v strip >/dev/null 2>&1; then
 fi
 
 # Adhoc-sign so codesign reports a bound Info.plist and the app launches cleanly
-# from Finder. Best-effort: do not fail the build if signing is unavailable, but
-# DO print the reason - a rejected signature is usually a bundle-hygiene problem
-# (detritus xattrs / stray files) worth fixing in the build, not hiding.
+# from Finder (unsigned bundles are killed under the hardened runtime).
+#
+# SIGNING MUST HAPPEN OUTSIDE ANY FileProvider/iCloud-SYNCED TREE. Such trees
+# re-apply com.apple.FinderInfo and com.apple.fileprovider.fpfs#P to the bundle
+# root within ~1s of `xattr -cr`, and codesign rejects both with
+# "resource fork, Finder information, or similar detritus not allowed" -- the
+# signature can even go stale right after a successful sign. script/
+# macos_release_package.sh therefore stages the bundle under $TMPDIR and
+# finalizes it there. In-tree callers get a warning instead of a hard failure.
+#
+# OFD_REQUIRE_SIGN=1 (set by the release packaging path) promotes a failed sign
+# or a failed verification to a hard error, so a broken signature can never ship
+# silently. Debug builds keep the lenient behaviour.
 if command -v codesign >/dev/null 2>&1; then
+  # Re-purge immediately before signing: anything that touched the bundle since
+  # the purge above (Finder, FileProvider, strip) would otherwise break codesign.
   xattr -cr "${BUNDLE_DIR}" 2>/dev/null || true
-  if err="$(codesign --force --sign - "${BUNDLE_DIR}" 2>&1)"; then
-    echo "Bundle adhoc-signed."
+
+  sign_err=""
+  if sign_err="$(codesign --force --sign - "${BUNDLE_DIR}" 2>&1)"; then
+    verify_err=""
+    if verify_err="$(codesign --verify --deep --strict "${BUNDLE_DIR}" 2>&1)"; then
+      echo "Bundle adhoc-signed and verified."
+    else
+      echo "WARN: signature does not verify - the bundle is not safely signed:" >&2
+      printf '%s\n' "${verify_err}" | sed 's/^/        /' >&2
+      # Never leave a half-broken signature behind: an invalid one is worse than
+      # no signature at all, because it fails the same launch check with a
+      # confusing message.
+      rm -rf "${BUNDLE_DIR}/Contents/_CodeSignature"
+      if [ "${OFD_REQUIRE_SIGN:-0}" = "1" ]; then
+        echo "ERROR: OFD_REQUIRE_SIGN=1 and the signature did not verify." >&2
+        exit 1
+      fi
+    fi
   else
     echo "WARN: codesign failed; bundle still launches unsigned:" >&2
-    printf '%s\n' "${err}" | sed 's/^/        /' >&2
+    printf '%s\n' "${sign_err}" | sed 's/^/        /' >&2
+    rm -rf "${BUNDLE_DIR}/Contents/_CodeSignature"
+    if [ "${OFD_REQUIRE_SIGN:-0}" = "1" ]; then
+      echo "ERROR: OFD_REQUIRE_SIGN=1 and codesign failed." >&2
+      exit 1
+    fi
   fi
 fi
