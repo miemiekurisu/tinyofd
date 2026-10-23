@@ -4,8 +4,8 @@
 
 **乱码修复 / Garbled-text fix**
 
-平台：仅 **Windows (x64)**（便携 zip，解压即用，无需安装）。
-Platform: **Windows (x64)** only (portable zip, extract and run, no install).
+平台：**Windows (x64)** 与 **macOS (Apple Silicon / arm64)**（便携 zip，解压即用，无需安装）。
+Platform: **Windows (x64)** and **macOS (Apple Silicon / arm64)** (portable zip, extract and run, no install).
 
 ### Fixed
 - 资源文件路径不再硬编码。`Document.xml` 的 `<CommonData>` 所声明的 `PublicRes` / `DocumentRes` 文件名（例如某些生成器输出的 `PublicRes_0.xml`）现在会被解析并定位到包内条目；此前固定查找 `PublicRes.xml` 会静默丢失该文件里声明的全部内嵌字体与图片，依赖字体 cmap 还原的正文因此渲染为乱码。
@@ -15,18 +15,25 @@ Platform: **Windows (x64)** only (portable zip, extract and run, no install).
 - `script/clean.ps1` 不再越界删除 `_tmp/vendor` 下的第三方构建中间产物（`-Exclude` 只匹配叶子名）。
   `script/clean.ps1` no longer deletes third-party intermediates under `_tmp/vendor` (`-Exclude` only matches leaf names).
 
+### Tooling
+- `script/macos_release_package.sh`（新）生成 macOS arm64 发布 zip：bundle 先复制到 `$TMPDIR` 再 finalize / 签名 / 打包，因为在本仓库的 FileProvider 同步树内签名会得到无效签名（`detritus not allowed`）并在启动时静默失败。
+  `script/macos_release_package.sh` (new) produces the macOS arm64 release zip; the bundle is staged under `$TMPDIR` and finalized/signed/zipped there, because signing inside this FileProvider-synced tree yields an invalid signature (`detritus not allowed`) that fails silently at launch.
+
 ### Quality
 - 1016 个自动化测试通过（新增 7 个回归用例：资源路径 4 个 + 字体回退 3 个）。
   1016 automated tests passing (7 new regression cases: 4 resource-path, 3 font-fallback).
 - 视觉回归（gemma4:12B 视觉模型）：`bugluanma.ofd` 第 1 页中文标题/正文清晰无乱码、无黑块。
   Visual regression (gemma4:12B vision QA): page 1 of `bugluanma.ofd` renders crisp Chinese text, no garbled glyphs, no black blocks.
+- macOS (arm64) 无头渲染验收：`发票示例`、`不规范资源路径`、`文字横向-数科`、`透明度文字`、`containsJPEG`、`intro-数科`、`发票监制章-数科` 七个样例页面渲染正确，无乱码、无黑块。
+  macOS (arm64) headless render acceptance: seven samples (`发票示例`, `不规范资源路径`, `文字横向-数科`, `透明度文字`, `containsJPEG`, `intro-数科`, `发票监制章-数科`) render correctly with no garbled glyphs and no black blocks.
 
 ### Download
 - GitHub Releases asset: `tinyofd-win64-0.0.4-<date>.zip`
+- GitHub Releases asset: `tinyofd-macos-arm64-0.0.4-<date>.zip`（macOS 首次打开：右键 → 打开 / right-click → Open）
 
 ### Notes
-- 仅 Windows (x64)。macOS 构建未做完整运行时验收，不作为发布版本；Linux 未验证。
-  Windows (x64) only. The macOS build is not runtime-verified and is not release-ready; Linux is unvalidated.
+- Windows (x64) 与 macOS (Apple Silicon / arm64) 均已验收。macOS 包为 adhoc 签名（未经 Apple 公证），首次打开需右键 → 打开，或 `xattr -dr com.apple.quarantine`。Linux 未验证。
+  Windows (x64) and macOS (Apple Silicon / arm64) are both runtime-verified. The macOS bundle is adhoc-signed (not notarized): use right-click → Open on first launch, or `xattr -dr com.apple.quarantine`. Linux is unvalidated.
 
 ## v0.0.3 (2026-09-16)
 

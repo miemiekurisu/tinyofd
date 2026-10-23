@@ -44,8 +44,8 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 - 懒加载 + 缓存策略：按需解析页面、缓存渲染结果，保证打开与翻页流畅
   Lazy loading + caching: pages parsed on demand, render results cached, for smooth open and paging
 - 跨平台：Windows / macOS / Linux / Cross-platform: Windows / macOS / Linux
-  > **⚠️ 发布状态 / Release status**: **目前仅 Windows (x64) 为正式发布状态**。macOS 已可完整构建、签名并跑通单元/渲染测试，但**运行时验收尚未完成，不视为 release**；Linux 未验证。请以 `release/` 目录中的 Windows 便携 zip 为准。
-  > **⚠️ Release status**: **Only Windows (x64) is a supported release today.** macOS now builds, signs and passes its unit/render tests, but **runtime acceptance is not done, so it is NOT release-ready**; Linux is unvalidated. Use the Windows portable zip in `release/`.
+  > **发布状态 / Release status**: **Windows (x64) 与 macOS (Apple Silicon / arm64) 均为正式发布平台**，便携 zip 见 GitHub Releases；Linux 未验证。
+  > **Release status**: **Windows (x64) and macOS (Apple Silicon / arm64) are both supported release platforms** — grab the portable zips from GitHub Releases. Linux is unvalidated.
 
 ## 截图 / Screenshot
 
@@ -73,10 +73,10 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 # apps/ofdviewer/ofd_version.pas (keep ofdviewer.rc in sync)
 ```
 
-### macOS（⚠️ 未完成 / NOT release-ready）
+### macOS (Apple Silicon)
 
-> **⚠️ 重要 / IMPORTANT**：macOS 版尚未做完整的运行时验收，仍**不作为发布版本**。目前唯一受支持的发布平台是 **Windows (x64)**。
-> **⚠️ IMPORTANT**: the macOS build is not yet fully verified at runtime and is **not a release artifact**. The only supported release platform remains **Windows (x64)**.
+需要 macOS 11+（arm64）。发布包是 adhoc 签名的便携 `.app`，详见「发布产物 / Releases」。
+Requires macOS 11+ (arm64). The release artifact is an adhoc-signed portable `.app`; see "发布产物 / Releases".
 
 构建脚本 / build scripts:
 
@@ -84,10 +84,12 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 export LAZARUS_DIR=<Lazarus 根目录 / root>   # 含 lazbuild；脚本也会自动探测常见位置
 ./script/macos_build.sh                      # 调试构建（控制台 apptype，带调试信息）
 ./script/macos_release.sh                    # 生产构建 .app（GUI apptype、-O2、strip、adhoc 签名）
+./script/macos_release_package.sh            # 打包发布 zip（.app + README + LICENSE）
 # 产物 / Output: _tmp/build/ofdviewer.app 与 _tmp/release/ofdviewer.app
+# 发布 zip / Release zip: _tmp/release/tinyofd-macos-arm64-<version>-<date>.zip
 ```
 
-**构建期链接器要求 / linker requirement at build time**（macOS 未完成的主因 / the main macOS build blocker）：
+**构建期链接器要求 / linker requirement at build time**（`script/macos_toolchain.sh` 自动处理 / handled automatically by `script/macos_toolchain.sh`）：
 
 FPC 3.2.2 的 aarch64 Mach-O 生成器输出的 ObjC method list 会被新版 Apple 链接器
 （ld-prime：Xcode 16+/ld-1xxx、2026 版 Command Line Tools ld）判定为
@@ -114,6 +116,18 @@ FPC trunk（3.3.1+）修好这个问题后，探测会自动选中新版 ld，�
   exe 同目录的 `ofdviewer.ini`（便携版行为不变）。
 - Bundle 由 `script/macos_finalize_bundle.sh` 统一生成 `Info.plist`、图标、Material Icons
   字体，并做 adhoc 签名（`org.tinyofd.ofdviewer`）。
+- `script/macos_release_package.sh` 先把 bundle 复制到 `$TMPDIR`（非同步目录）再 finalize、
+  签名、打包并解压回验；签名必须在同步树之外进行，因为仓库所在的 FileProvider/iCloud
+  同步树会在 `xattr -cr` 后约 1 秒重新贴上 `com.apple.FinderInfo` /
+  `com.apple.fileprovider.fpfs#P`，codesign 会报 `detritus not allowed` 且签名静默失效。
+  该脚本要求签名必须通过（`OFD_REQUIRE_SIGN=1`），失败即中止；`OFD_SKIP_BUILD=1` 可复用
+  已有构建产物。
+  `script/macos_release_package.sh` stages the bundle under `$TMPDIR` (not synced) before
+  finalizing, signing, zipping and re-verifying the extracted copy: signing must happen
+  outside the FileProvider/iCloud tree, which re-applies `com.apple.FinderInfo` /
+  `com.apple.fileprovider.fpfs#P` ~1s after `xattr -cr` and makes codesign fail with
+  `detritus not allowed` (silently invalidating the signature). The script requires the
+  signature to verify; `OFD_SKIP_BUILD=1` reuses an existing bundle.
 
 ### 测试 / Tests
 
@@ -139,9 +153,20 @@ samples live outside the tree.
 ## 发布产物 / Releases
 
 > 正式安装包发布在 **GitHub Releases**：<https://github.com/miemiekurisu/tinyofd/releases>。
-> 当前版本 **v0.0.4**，提供 Windows (x64) 便携版 zip（`tinyofd-win64-<version>-<date>.zip`，解压即用，无需安装）。
+> 当前版本 **v0.0.4** 提供两个便携包（解压即用，无需安装）：
+> - Windows (x64)：`tinyofd-win64-<version>-<date>.zip`
+> - macOS (Apple Silicon / arm64)：`tinyofd-macos-arm64-<version>-<date>.zip`（含 `ofdviewer.app` + `README.md` + `LICENSE`）
 > Releases are published on **GitHub Releases**: <https://github.com/miemiekurisu/tinyofd/releases>.
-> Current version **v0.0.4**, Windows (x64) portable zip (`tinyofd-win64-<version>-<date>.zip`; extract and run, no install needed).
+> Current version **v0.0.4** ships two portable zips (extract and run, no install needed):
+> - Windows (x64): `tinyofd-win64-<version>-<date>.zip`
+> - macOS (Apple Silicon / arm64): `tinyofd-macos-arm64-<version>-<date>.zip` (contains `ofdviewer.app` + `README.md` + `LICENSE`)
+>
+> macOS 包是 adhoc 签名（未经 Apple 公证），首次打开请**右键 → 打开**，或执行
+> `xattr -dr com.apple.quarantine /path/to/ofdviewer.app` 绕过 Gatekeeper。
+> The macOS bundle is adhoc-signed (not notarized): on first launch use **right-click → Open**, or run
+> `xattr -dr com.apple.quarantine /path/to/ofdviewer.app` to bypass Gatekeeper.
+>
+> 本地重打包 / Repackage locally: `./script/macos_release_package.sh`（macOS）。
 >
 > 仓库内 `release/` 目录仅为早期版本存档，不再更新。
 > The in-repo `release/` folder is a legacy archive and no longer updated.
