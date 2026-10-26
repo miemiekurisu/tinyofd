@@ -1,0 +1,53 @@
+TinyOFD Viewer - macOS installation
+===================================
+
+Requirements
+------------
+* Apple Silicon Mac (M1/M2/M3/M4 or newer). This build is arm64 only and
+  does not run on Intel Macs.
+* macOS 11 Big Sur or later.
+
+Install
+-------
+1. Double-click the downloaded zip. Finder extracts "ofdviewer.app".
+2. Optionally drag "ofdviewer.app" into /Applications.
+3. On the FIRST launch only, follow "Gatekeeper" below.
+
+Gatekeeper (first launch only)
+------------------------------
+This build is adhoc-signed, not notarized by Apple, so Gatekeeper blocks the
+first launch of a downloaded copy. That is expected; the file is not corrupt.
+
+Recommended: open Terminal and run
+
+    xattr -dr com.apple.quarantine /Applications/ofdviewer.app
+
+Use the real path if you did not move the app. Then open it normally.
+
+Without Terminal:
+* macOS 14 and earlier: Control-click (or right-click) the app, choose Open,
+  then click Open in the dialog.
+* macOS 15 and later: try to open it once, then go to
+  System Settings -> Privacy & Security and click "Open Anyway" for
+  TinyOFD Viewer.
+
+After one successful launch the quarantine flag is gone and later launches
+work with a normal double-click.
+
+"ofdviewer.app is damaged and can't be opened"
+----------------------------------------------
+This is Gatekeeper refusing the unnotarized build, not a broken download.
+Run the xattr command above. The path must point at the .app bundle itself,
+not at its Contents folder.
+
+Verify the download (optional)
+------------------------------
+    shasum -a 256 tinyofd-macos-arm64-<version>-<date>.zip
+
+Compare it with the SHA-256 published in the GitHub release notes.
+
+Where settings are stored
+-------------------------
+~/Library/Application Support/TinyOFD/
+
+Nothing is written inside the .app bundle, so the code signature stays valid.

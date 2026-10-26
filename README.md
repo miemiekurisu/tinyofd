@@ -75,8 +75,13 @@ A from-scratch OFD (Open Fixed-layout Document) parsing, rendering and reader su
 
 ### macOS (Apple Silicon)
 
-需要 macOS 11+（arm64）。发布包是 adhoc 签名的便携 `.app`，详见「发布产物 / Releases」。
-Requires macOS 11+ (arm64). The release artifact is an adhoc-signed portable `.app`; see "发布产物 / Releases".
+需要 macOS 11+，**仅支持 Apple Silicon（arm64）**，Intel Mac 不可用。发布包是 adhoc 签名的
+便携 `.app`，未经 Apple 公证；从 GitHub 下载后首次启动会被 Gatekeeper 拦截，这不是文件损坏，
+解除 quarantine 后即可正常双击打开，详见「发布产物 / Releases」。
+Requires macOS 11+ on **Apple Silicon (arm64) only**; Intel Macs are not supported. The release
+artifact is an adhoc-signed portable `.app` that is not notarized, so Gatekeeper blocks the first
+launch of a downloaded copy. That is not a corrupt download; clear the quarantine as described in
+"Releases" and later launches work with a normal double-click.
 
 构建脚本 / build scripts:
 
@@ -84,7 +89,7 @@ Requires macOS 11+ (arm64). The release artifact is an adhoc-signed portable `.a
 export LAZARUS_DIR=<Lazarus 根目录 / root>   # 含 lazbuild；脚本也会自动探测常见位置
 ./script/macos_build.sh                      # 调试构建（控制台 apptype，带调试信息）
 ./script/macos_release.sh                    # 生产构建 .app（GUI apptype、-O2、strip、adhoc 签名）
-./script/macos_release_package.sh            # 打包发布 zip（.app + README + LICENSE）
+./script/macos_release_package.sh            # 打包发布 zip（.app + README + LICENSE + INSTALL-macOS.txt）
 # 产物 / Output: _tmp/build/ofdviewer.app 与 _tmp/release/ofdviewer.app
 # 发布 zip / Release zip: _tmp/release/tinyofd-macos-arm64-<version>-<date>.zip
 ```
@@ -117,7 +122,9 @@ FPC trunk（3.3.1+）修好这个问题后，探测会自动选中新版 ld，�
 - Bundle 由 `script/macos_finalize_bundle.sh` 统一生成 `Info.plist`、图标、Material Icons
   字体，并做 adhoc 签名（`org.tinyofd.ofdviewer`）。
 - `script/macos_release_package.sh` 先把 bundle 复制到 `$TMPDIR`（非同步目录）再 finalize、
-  签名、打包并解压回验；签名必须在同步树之外进行，因为仓库所在的 FileProvider/iCloud
+  签名、打包并解压回验，同时模拟“浏览器下载后被 quarantine”的完整路径（解压后重新验签、
+  检查架构/最低系统版本/可执行位，并确认没有把本机的 FinderInfo 或 FileProvider xattr 带进
+  zip）。签名必须在同步树之外进行，因为仓库所在的 FileProvider/iCloud
   同步树会在 `xattr -cr` 后约 1 秒重新贴上 `com.apple.FinderInfo` /
   `com.apple.fileprovider.fpfs#P`，codesign 会报 `detritus not allowed` 且签名静默失效。
   该脚本要求签名必须通过（`OFD_REQUIRE_SIGN=1`），失败即中止；`OFD_SKIP_BUILD=1` 可复用
@@ -126,8 +133,10 @@ FPC trunk（3.3.1+）修好这个问题后，探测会自动选中新版 ld，�
   finalizing, signing, zipping and re-verifying the extracted copy: signing must happen
   outside the FileProvider/iCloud tree, which re-applies `com.apple.FinderInfo` /
   `com.apple.fileprovider.fpfs#P` ~1s after `xattr -cr` and makes codesign fail with
-  `detritus not allowed` (silently invalidating the signature). The script requires the
-  signature to verify; `OFD_SKIP_BUILD=1` reuses an existing bundle.
+  `detritus not allowed` (silently invalidating the signature). It also replays a quarantined
+  browser download (extract, re-verify the signature, check architecture / minimum OS /
+  executable bit, and reject any FinderInfo or FileProvider xattr that leaked into the zip).
+  The script requires the signature to verify; `OFD_SKIP_BUILD=1` reuses an existing bundle.
 
 ### 测试 / Tests
 
@@ -155,16 +164,32 @@ samples live outside the tree.
 > 正式安装包发布在 **GitHub Releases**：<https://github.com/miemiekurisu/tinyofd/releases>。
 > 当前版本 **v0.0.4** 提供两个便携包（解压即用，无需安装）：
 > - Windows (x64)：`tinyofd-win64-<version>-<date>.zip`
-> - macOS (Apple Silicon / arm64)：`tinyofd-macos-arm64-<version>-<date>.zip`（含 `ofdviewer.app` + `README.md` + `LICENSE`）
+> - macOS (Apple Silicon / arm64)：`tinyofd-macos-arm64-<version>-<date>.zip`（含 `ofdviewer.app` + `README.md` + `LICENSE` + `INSTALL-macOS.txt`）
 > Releases are published on **GitHub Releases**: <https://github.com/miemiekurisu/tinyofd/releases>.
 > Current version **v0.0.4** ships two portable zips (extract and run, no install needed):
 > - Windows (x64): `tinyofd-win64-<version>-<date>.zip`
-> - macOS (Apple Silicon / arm64): `tinyofd-macos-arm64-<version>-<date>.zip` (contains `ofdviewer.app` + `README.md` + `LICENSE`)
+> - macOS (Apple Silicon / arm64): `tinyofd-macos-arm64-<version>-<date>.zip` (contains `ofdviewer.app` + `README.md` + `LICENSE` + `INSTALL-macOS.txt`)
 >
-> macOS 包是 adhoc 签名（未经 Apple 公证），首次打开请**右键 → 打开**，或执行
-> `xattr -dr com.apple.quarantine /path/to/ofdviewer.app` 绕过 Gatekeeper。
-> The macOS bundle is adhoc-signed (not notarized): on first launch use **right-click → Open**, or run
-> `xattr -dr com.apple.quarantine /path/to/ofdviewer.app` to bypass Gatekeeper.
+> macOS 包是 adhoc 签名（未经 Apple 公证），且仅支持 Apple Silicon。从浏览器下载后首次启动会被
+> Gatekeeper 拦截；macOS 15+ 上右键“打开”也可能直接被拒绝，提示 “is damaged and can't be opened”，
+> 这是未公证导致的策略拦截，不是 zip 或签名损坏。任选一种方式放行：
+>
+> 1. 终端执行 `xattr -dr com.apple.quarantine /Applications/ofdviewer.app`（换成实际路径），之后双击即可；
+> 2. macOS 15+：先尝试打开一次 →「系统设置 → 隐私与安全性 → 仍要打开 / Open Anyway」；
+> 3. macOS 14 及更早：右键 →「打开」→ 对话框中再次「打开」。
+>
+> zip 内的 `INSTALL-macOS.txt` 有上述步骤。每个 release asset 的 SHA-256 列在 release notes 中。
+> The macOS bundle is adhoc-signed (not notarized) and Apple Silicon only. Gatekeeper blocks the
+> first launch of a downloaded copy; on macOS 15+ even right-click → Open can be refused with
+> "is damaged and can't be opened". That is a policy rejection for an unnotarized bundle, not a
+> corrupt zip or signature. Clear it with any of:
+>
+> 1. `xattr -dr com.apple.quarantine /Applications/ofdviewer.app` (use the real path), then double-click;
+> 2. macOS 15+: try to open once, then System Settings → Privacy & Security → "Open Anyway";
+> 3. macOS 14 and earlier: right-click → Open → Open again in the dialog.
+>
+> `INSTALL-macOS.txt` inside the zip documents these steps. Each release asset's SHA-256 is listed
+> in the release notes.
 >
 > 本地重打包 / Repackage locally: `./script/macos_release_package.sh`（macOS）。
 >

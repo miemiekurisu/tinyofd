@@ -28,12 +28,21 @@ Platform: **Windows (x64)** and **macOS (Apple Silicon / arm64)** (portable zip,
   macOS (arm64) headless render acceptance: seven samples (`发票示例`, `不规范资源路径`, `文字横向-数科`, `透明度文字`, `containsJPEG`, `intro-数科`, `发票监制章-数科`) render correctly with no garbled glyphs and no black blocks.
 
 ### Download
-- GitHub Releases asset: `tinyofd-win64-0.0.4-<date>.zip`
-- GitHub Releases asset: `tinyofd-macos-arm64-0.0.4-<date>.zip`（macOS 首次打开：右键 → 打开 / right-click → Open）
+- Windows (x64): `tinyofd-win64-0.0.4-20261017.zip`
+  SHA-256: `cfb7543203bc71319ad2212d04bbbcdfe50e3172efd1756cebcf821025d807d1`
+- macOS (Apple Silicon / arm64): `tinyofd-macos-arm64-0.0.4-20261026.zip`（内含 `ofdviewer.app`、`README.md`、`LICENSE`、`INSTALL-macOS.txt`）
+  SHA-256: `e3fd85efd256f894bf0577b94e6d16fc3c2ec5b08c1e501b9d9bb8ad17a7569f`
 
 ### Notes
-- Windows (x64) 与 macOS (Apple Silicon / arm64) 均已验收。macOS 包为 adhoc 签名（未经 Apple 公证），首次打开需右键 → 打开，或 `xattr -dr com.apple.quarantine`。Linux 未验证。
-  Windows (x64) and macOS (Apple Silicon / arm64) are both runtime-verified. The macOS bundle is adhoc-signed (not notarized): use right-click → Open on first launch, or `xattr -dr com.apple.quarantine`. Linux is unvalidated.
+- Windows (x64) 与 macOS (Apple Silicon / arm64) 均已验收。macOS 包仅支持 Apple Silicon（Intel Mac 不可用），要求 macOS 11+。
+  Windows (x64) and macOS (Apple Silicon / arm64) are both runtime-verified. The macOS build is Apple Silicon only (no Intel Macs) and requires macOS 11+.
+- macOS 包为 adhoc 签名（未经 Apple 公证），首次启动会被 Gatekeeper 拦截；这是策略拦截，不是文件损坏。任选一种方式放行，之后可正常双击打开：
+  1. 终端执行 `xattr -dr com.apple.quarantine /Applications/ofdviewer.app`（换成实际路径）；
+  2. macOS 15+：先尝试打开一次 →「系统设置 → 隐私与安全性 → 仍要打开 / Open Anyway」；
+  3. macOS 14 及更早：右键 →「打开」→ 对话框中再次「打开」。
+  The macOS bundle is adhoc-signed and not notarized, so Gatekeeper blocks the first launch. This is a policy rejection, not a corrupt download. Clear it with any of: (1) `xattr -dr com.apple.quarantine /Applications/ofdviewer.app`; (2) macOS 15+: try to open once, then System Settings → Privacy & Security → "Open Anyway"; (3) macOS 14 and earlier: right-click → Open → Open again.
+- 包内 `INSTALL-macOS.txt` 记录了上述步骤与校验方法；Linux 未验证。
+  The bundled `INSTALL-macOS.txt` documents these steps and checksum verification. Linux is unvalidated.
 
 ## v0.0.3 (2026-09-16)
 
